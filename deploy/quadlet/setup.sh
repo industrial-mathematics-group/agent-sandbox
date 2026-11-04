@@ -144,8 +144,8 @@ render() {   # render <template> <out>: fill in @VARS@
         -v config="${CONFIG_DIR/#$SB_HOME/%h}" -v addon="${ADDON_DIR/#$SB_HOME/%h}" \
         -v ws="$WORKSPACE" -v mem="$MEMORY" -v cpus="$CPUS" -v profiles="$PROFILES" -v ports="$ports_csv" \
         -v publish="$(printf '%s\n' "${publish[@]}")" -v langvols="$(printf '%s\n' "${LANG_VOLUMES[@]}")" '
-        $0 == "@PUBLISH_PORTS@" { if (publish != "") printf "%s", publish; else print "# (none)"; next }
-        $0 == "@LANG_VOLUMES@" { if (langvols != "") printf "%s", langvols; next }
+        $0 == "@PUBLISH_PORTS@" { if (publish != "") printf "%s\n", publish; else print "# (none)"; next }
+        $0 == "@LANG_VOLUMES@" { if (langvols != "") printf "%s\n", langvols; next }
         { gsub(/@NAME@/, name); gsub(/@FLAVOR@/, flavor); gsub(/@IMAGE_ROCM@/, image_rocm); gsub(/@IMAGE@/, image)
           gsub(/@GATEWAY_TS_IMAGE@/, gwts); gsub(/@GATEWAY_IMAGE@/, gw)
           gsub(/@CONFIG_DIR@/, config); gsub(/@ADDON_DIR@/, addon); gsub(/@WORKSPACE@/, ws)
