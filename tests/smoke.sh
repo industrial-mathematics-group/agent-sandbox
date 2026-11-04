@@ -25,7 +25,7 @@ if ! dc up -d; then
     exit 1
 fi
 for _ in $(seq 90); do
-    dc logs agent 2>/dev/null | grep -q "Network ready" && break
+    dc logs agent 2>/dev/null | grep -q "Sandbox ready" && break   # after the Claude Code install
     if ! dc ps --status running --services | grep -q agent; then break; fi
     sleep 2
 done
