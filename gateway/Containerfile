@@ -13,8 +13,10 @@ FROM ${BASE_IMAGE}
 RUN apk add --no-cache bash ipset bind-tools jq curl iproute2 iptables ip6tables tinyproxy \
  && addgroup -S -g 3128 agentproxy \
  && adduser -S -D -H -u 3128 -G agentproxy -s /sbin/nologin agentproxy \
- && install -d -m 0755 /etc/agent-sandbox /run/agent-gateway
+ && install -d -m 0755 /etc/agent-sandbox /etc/agent-sandbox/lists /run/agent-gateway
 
+# lists/ is created above: COPY --chmod would otherwise give the new directory
+# mode 0644 too, and root without CAP_DAC_OVERRIDE couldn't read it at runtime.
 COPY --chmod=0644 lists/ /etc/agent-sandbox/lists/
 COPY --chmod=0755 entrypoint.sh render-config.sh init-firewall.sh /usr/local/bin/
 
