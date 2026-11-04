@@ -18,7 +18,7 @@
 #                        plain: published on 127.0.0.1:N of the host; tailscale: open on the tailnet
 #   --gpu amd|nvidia     local GPU (amd switches to the -rocm image)
 #   --addon NAME         specific add-on: gpu-remote, slurm (repeatable)
-#   --memory SIZE --cpus N   container limits (default: 16g, 8)
+#   --memory SIZE --cpus N   container limits (default: 16g, min(8, nproc))
 #   --registry REG       image registry (default: $AGENT_SANDBOX_REGISTRY or ghcr.io/OWNER;
 #                        use "localhost" for images built with ./build.sh)
 #   --sandbox-user USER  run the containers as this user (default: agent-sandbox;
@@ -43,7 +43,7 @@ PORTS=()
 GPU=
 ADDONS=()
 MEMORY=16g
-CPUS=8
+CPUS=$(n=$(nproc 2>/dev/null || echo 8); [ "$n" -lt 8 ] && echo "$n" || echo 8)   # 8, or fewer on smaller hosts
 REGISTRY=${AGENT_SANDBOX_REGISTRY:-ghcr.io/OWNER}
 SANDBOX_USER=agent-sandbox
 HOST_SETUP=1
