@@ -12,8 +12,8 @@
 #             that ignore proxy settings. Address-based, so coarse (shared CDN IPs).
 #   open      like standard, but the proxy lets every public host through.
 #
-# Always: LAN, link-local, CGNAT/tailnet and IPv6 blocked; inbound closed except
-# GATEWAY_INBOUND_PORTS. With GATEWAY_VPN=tailscale, all egress (proxy and strict
+# Always: LAN, link-local, CGNAT/tailnet and IPv6 blocked (except the addresses in
+# GATEWAY_PRIVATE_ALLOW, see below); inbound closed except GATEWAY_INBOUND_PORTS. With GATEWAY_VPN=tailscale, all egress (proxy and strict
 # direct) may only leave via tailscale0, i.e. through the exit node; if the tunnel
 # is down nothing gets out. tailscaled's own traffic is recognised by its fwmark.
 #
@@ -130,6 +130,20 @@ done <<< "$resolvers"
 
 iptables -A OUTPUT -o lo -j ACCEPT
 
+# GATEWAY_PRIVATE_ALLOW: private addresses the proxy (and strict direct access)
+# may still reach, e.g. your own services on the tailnet or LAN. The proxy's
+# hostname allowlist still applies, so the host must be allowlisted as well. Name
+# single addresses where you can: a wide range lets every allowlisted name that
+# resolves into it through, including ones whose DNS someone else controls.
+IFS=' ,' read -r -a private_allow <<< "${GATEWAY_PRIVATE_ALLOW:-}"
+private_ok=()
+for c in "${private_allow[@]}"; do
+    [ -n "$c" ] || continue
+    is_ipv4_net "$c" || { echo "ERROR: GATEWAY_PRIVATE_ALLOW: '$c' is not an IPv4 address/network" >&2; exit 1; }
+    private_ok+=("$c")
+done
+[ ${#private_ok[@]} -eq 0 ] || echo "Private addresses allowed: $(IFS=" "; echo "${private_ok[*]}")"
+
 # Never to private / special ranges (LAN, router, tailnet peers, metadata service)
 iptables -N NO-PRIVATE
 for net in ${PRIVATE_NETS// /$'\n'}; do
@@ -148,6 +162,9 @@ if [ -n "${GATEWAY_UPSTREAM_PROXY:-}" ]; then
     done <<< "$up_ips"
     echo "Upstream proxy: $GATEWAY_UPSTREAM_PROXY"
 else
+    for c in "${private_ok[@]}"; do
+        iptables -A PROXY-OUT -d "$c" "${OUT_IF[@]}" -p tcp -m multiport --dports 80,443,22 -j ACCEPT
+    done
     iptables -A PROXY-OUT -j NO-PRIVATE
     iptables -A PROXY-OUT "${OUT_IF[@]}" -p tcp -m multiport --dports 80,443,22 -j ACCEPT
 fi
@@ -156,6 +173,9 @@ iptables -A OUTPUT -m owner --uid-owner "$PROXY_UID" -j PROXY-OUT
 
 # strict: direct to the resolved allowlist
 if [ "$MODE" = strict ]; then
+    for c in "${private_ok[@]}"; do
+        iptables -A OUTPUT -d "$c" "${OUT_IF[@]}" -m set --match-set allowed-ips dst -j ACCEPT
+    done
     iptables -A OUTPUT -j NO-PRIVATE
     iptables -A OUTPUT "${OUT_IF[@]}" -m set --match-set allowed-ips dst -j ACCEPT
 fi
