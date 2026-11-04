@@ -1,0 +1,58 @@
+# agent-sandbox instance "@NAME@": the agent container (@FLAVOR@).
+# Shares the gateway's network namespace, has no network capabilities, sees only
+# its workspace.
+#
+#   podman exec -it -u agent @NAME@ claude
+[Unit]
+Description=agent-sandbox @NAME@ - agent (@FLAVOR@)
+# Start after the gateway; stop and restart together with it (a restarted gateway
+# has a new network namespace, so the agent must follow and fails closed).
+Requires=@NAME@-gateway.service
+After=@NAME@-gateway.service
+BindsTo=@NAME@-gateway.service
+PartOf=@NAME@-gateway.service
+
+[Container]
+Image=@IMAGE@
+ContainerName=@NAME@
+Network=@NAME@-gateway.container
+AutoUpdate=registry
+
+# Your host user (the sandbox user) appears as `agent` (uid 1000) inside
+UserNS=keep-id:uid=1000,gid=1000
+DropCapability=all
+AddCapability=SETUID SETGID
+NoNewPrivileges=true
+RunInit=true
+PidsLimit=4096
+# shm for Xvfb/Mesa/Chromium + hard limits so a runaway test can't freeze the
+# machine. Plain podman flags: works on older Podman/Quadlet versions too.
+PodmanArgs=--shm-size=1g --memory=@MEMORY@ --cpus=@CPUS@
+
+EnvironmentFile=@CONFIG_DIR@/sandbox.env
+Environment=NODE_OPTIONS=--max-old-space-size=4096
+Environment=POWERLEVEL9K_DISABLE_GITSTATUS=true
+# Project files are owned by two host users; tell git that's fine in here
+Environment=GIT_CONFIG_COUNT=1
+Environment=GIT_CONFIG_KEY_0=safe.directory
+Environment=GIT_CONFIG_VALUE_0=*
+
+# Workspace (prepared by setup.sh; already SELinux-labelled, so no :Z here)
+Volume=@WORKSPACE@:/workspace
+# Shared between instances: Claude login/settings, history, language caches
+Volume=agent-sandbox-claude:/home/agent/.claude
+Volume=agent-sandbox-history:/commandhistory
+Volume=agent-sandbox-cache:/home/agent/.cache
+@LANG_VOLUMES@
+
+# Run as a long-lived service; you attach with `podman exec`
+Exec=sleep infinity
+
+[Service]
+Restart=on-failure
+RestartSec=15
+# First start pulls the image
+TimeoutStartSec=900
+
+[Install]
+WantedBy=default.target

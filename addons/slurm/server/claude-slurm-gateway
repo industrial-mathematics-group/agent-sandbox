@@ -1,0 +1,409 @@
+#!/bin/bash
+# claude-slurm-gateway: the ONLY thing the Claude sandbox's SSH key can run on
+# the cluster. Installed as a forced command in ~/.ssh/authorized_keys:
+#
+#   restrict,command="$HOME/.local/bin/claude-slurm-gateway" ssh-ed25519 AAAA... claude-sandbox
+#
+# The requested command arrives in $SSH_ORIGINAL_COMMAND and is parsed here
+# (never passed to a shell). Allowed:
+#   sync        <project>                       tar.gz on stdin -> project copy
+#   instantiate <project> [env...]              Julia deps into the gateway's depot (root + env_* folders)
+#   submit      <project> <script.sh> [time=MIN] [gpus=N] [gputype=T] [cpus=N] [mem=GB] [partition=P] [-- args...]
+#   fetch       <jobid> [glob]                  tar.gz of the job's result files (default *.jld2) on stdout
+#   status      [project]                       queue + recent jobs (gateway jobs only)
+#   log         <jobid> [lines]                 tail of a gateway job's output
+#   cancel      <jobid>                         scancel, gateway jobs only
+#   info                                        limits + partitions
+#
+# Claude's script is never submitted itself. The gateway writes a wrapper job
+# whose resources come only from the checked arguments above (#SBATCH lines in
+# the script are ignored), and which runs the script with bash, or inside
+# Apptainer when APPTAINER_IMAGE is set (then the job sees only the project and
+# the depot: no home, no Slurm, no Munge, so it can't submit further jobs).
+set -euo pipefail
+umask 077
+
+CONFIG=${CLAUDE_SLURM_CONFIG:-$HOME/.config/claude-slurm/config}
+# shellcheck source=/dev/null
+[ -f "$CONFIG" ] && . "$CONFIG"
+
+BASE=${BASE:-$HOME/claude-jobs}             # projects/, depot/, logs/, jobs/
+ACCOUNT=${ACCOUNT:-}                         # --account, if the cluster needs one
+PARTITIONS=${PARTITIONS:-}                   # partitions allowed for CPU jobs (space separated); empty = cluster default only
+DEFAULT_PARTITION=${DEFAULT_PARTITION:-}
+# GPU jobs have their own list. "auto" = submit WITHOUT --partition and let the
+# cluster route the job (needed where job_submit rules reject --partition=gpu).
+GPU_PARTITIONS=${GPU_PARTITIONS:-auto}
+DEFAULT_GPU_PARTITION=${DEFAULT_GPU_PARTITION:-auto}
+# Jobs get a private /tmp under this dir on the compute node (deleted afterwards);
+# empty = the node's $TMPDIR (Slurm job tmp) or /tmp.
+JOB_TMP_BASE=${JOB_TMP_BASE:-}
+MAX_TIME_MIN=${MAX_TIME_MIN:-120}
+MAX_GPUS=${MAX_GPUS:-1}
+MAX_CPUS=${MAX_CPUS:-16}
+MAX_MEM_GB=${MAX_MEM_GB:-64}
+MAX_ACTIVE=${MAX_ACTIVE:-2}                  # pending + running gateway jobs
+GPU_ARG=${GPU_ARG:---gres=gpu:%d}            # printf template, e.g. --gpus=%d
+GPU_TYPES=${GPU_TYPES:-}                     # GPU types Claude may request via gputype= (space separated); empty = none
+GPU_TYPE_ARG=${GPU_TYPE_ARG:---gres=gpu:%s:%d}  # printf template: type, count
+FETCH_PATTERN=${FETCH_PATTERN:-*.jld2}       # default file pattern for `fetch`
+MAX_FETCH_BYTES=${MAX_FETCH_BYTES:-5368709120}  # 5 GiB per fetch
+JOB_SETUP=${JOB_SETUP:-}                     # trusted shell line run first in every job, e.g. "module load julia"
+APPTAINER_IMAGE=${APPTAINER_IMAGE:-}         # e.g. $HOME/claude-jobs/julia.sif; empty = plain bash
+APPTAINER_FLAGS=${APPTAINER_FLAGS:---nv}     # --nv for NVIDIA GPUs, --rocm for AMD
+JULIA=${JULIA:-julia}                        # plain mode only
+PKG_SERVER=${PKG_SERVER:-https://pkg.julialang.org}
+TIMEOUT_SETUP=${TIMEOUT_SETUP:-1800}
+MAX_SYNC_BYTES=${MAX_SYNC_BYTES:-1073741824} # 1 GiB compressed
+RUNS_KEEP_DAYS=${RUNS_KEEP_DAYS:-14}         # per-job code snapshots in runs/
+
+die()  { echo "gateway: $*" >&2; exit 2; }
+log()  { printf '%s %s\n' "$(date -Is)" "$*" >> "$BASE/gateway.log"; }
+
+mkdir -p "$BASE/projects" "$BASE/depot" "$BASE/logs" "$BASE/jobs" "$BASE/runs" "$BASE/tmp"
+chmod 700 "$BASE"
+touch "$BASE/jobs.tsv"
+
+# ---------------------------------------------------------------------------
+# Parse request: whitespace-separated tokens, strict character set
+# ---------------------------------------------------------------------------
+read -r -a ARGV <<< "${SSH_ORIGINAL_COMMAND:-}"
+for tok in "${ARGV[@]}"; do
+    [[ "$tok" =~ ^[A-Za-z0-9._/=:,+@-]+$ ]] && continue
+    # glob characters only for the fetch pattern (validated again there, never expanded)
+    [ "${ARGV[0]}" = fetch ] && [[ "$tok" =~ ^[A-Za-z0-9._*?-]+$ ]] && continue
+    die "rejected token: '$tok'"
+done
+log "request: ${SSH_ORIGINAL_COMMAND:-<none>}"
+CMD=${ARGV[0]:-help}
+ARGV=("${ARGV[@]:1}")
+
+project_dir() {
+    [[ "${1:-}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die "invalid project name '${1:-}'"
+    echo "$BASE/projects/$1"
+}
+is_uint() { [[ "$1" =~ ^[0-9]+$ ]]; }
+own_job() {   # job id submitted by this gateway?
+    [[ "${1:-}" =~ ^[0-9]+$ ]] || die "invalid job id '${1:-}'"
+    awk -F'\t' -v j="$1" '$1 == j {f=1} END {exit !f}' "$BASE/jobs.tsv" \
+        || die "job $1 was not submitted through this gateway"
+}
+# Code/result directory (runs/<stamp>) of a gateway job. Must be exact: a wrong
+# guess hands one job's results to another (several jobs per second in sweeps).
+run_dir_of() {
+    local id=$1 row name wrapper cand=() proj when t d stamp ts s
+    row=$(awk -F'\t' -v j="$id" '$1 == j' "$BASE/jobs.tsv" | tail -n 1)
+    # 1. Recorded at submit time (current gateway)
+    name=$(cut -f5 <<< "$row")
+    if [ -n "$name" ]; then
+        [ -d "$BASE/runs/$name" ] && { echo "$BASE/runs/$name"; return 0; }
+        return 1    # recorded but deleted: don't guess
+    fi
+    # 2. Older entries: ask Slurm which wrapper was submitted; the wrapper names its run dir
+    wrapper=$({ sacct -X -n -P -j "$id" -o SubmitLine 2>/dev/null
+                scontrol show job "$id" 2>/dev/null | sed -n 's/^ *Command=//p'; } \
+              | grep -o "$BASE/jobs/[A-Za-z0-9._-]*\.sh" | head -n 1)
+    if [ -n "$wrapper" ] && [ -f "$wrapper" ]; then
+        d=$(grep -o "$BASE/runs/[A-Za-z0-9._-]*" "$wrapper" | head -n 1)
+        [ -n "$d" ] && [ -d "$d" ] && { echo "$d"; return 0; }
+    fi
+    # 3. Last resort: project + submit time, ONLY if exactly one run dir fits
+    proj=$(cut -f2 <<< "$row"); when=$(cut -f4 <<< "$row")
+    t=$(date -d "$when" +%s 2>/dev/null) || return 1
+    for d in "$BASE/runs/$proj"-*; do
+        [ -d "$d" ] || continue
+        stamp=${d#"$BASE/runs/$proj-"}
+        [[ "$stamp" =~ ^([0-9]{8})-([0-9]{2})([0-9]{2})([0-9]{2})-[0-9]+$ ]] || continue
+        ts="${BASH_REMATCH[1]} ${BASH_REMATCH[2]}:${BASH_REMATCH[3]}:${BASH_REMATCH[4]}"
+        s=$(date -d "$ts" +%s 2>/dev/null) || continue
+        [ $(( s > t ? s - t : t - s )) -le 15 ] && cand+=("$d")
+    done
+    [ ${#cand[@]} -eq 1 ] && { echo "${cand[0]}"; return 0; }
+    [ ${#cand[@]} -gt 1 ] && echo "gateway: job $id: ${#cand[@]} run dirs were created within 15 s of its submission; refusing to guess" >&2
+    return 1
+}
+
+# The user's queue, restricted to jobs this gateway submitted: "id|name|state|..."
+our_queue() {
+    { squeue -h -u "$USER" -o '%i|%j|%T|%M|%l|%D|%R' 2>/dev/null || true; } \
+        | awk -F'|' 'NR == FNR {ours[$1] = 1; next} ($1 in ours)' <(cut -f1 "$BASE/jobs.tsv") -
+}
+active_jobs() {
+    our_queue | awk -F'|' '$3 ~ /^(PENDING|RUNNING|CONFIGURING|COMPLETING)$/' | wc -l
+}
+
+# Apptainer invocation shared by instantiate and jobs.
+# $1 = project dir, $2 = /tmp bind source, inserted RAW (gateway-generated:
+# a quoted path, or "$JOBTMP" to be expanded in the job), rest = command.
+# --containall gives the container only a tiny tmpfs /tmp (~64 MB), too small
+# for Pkg downloads, so a real directory is bound there.
+apptainer_cmd() {
+    local proj=$1 tmp_src=$2; shift 2
+    # shellcheck disable=SC2086
+    printf '%q ' apptainer exec --containall --no-home --cleanenv $APPTAINER_FLAGS \
+        --bind "$proj:/work" --bind "$BASE/depot:/depot"
+    printf -- '--bind %s:/tmp ' "$tmp_src"
+    printf '%q ' --pwd /work "$APPTAINER_IMAGE"
+    printf '%q ' "$@"
+}
+
+INSTANTIATE_JL='
+using Pkg
+# ARGS: environments to set up ("." = project root, env_* = sub-environments).
+# Empty -> the root (if it has a Project.toml) plus every env_*/Project.toml.
+root = pwd()
+envs = isempty(ARGS) ?
+    vcat(isfile("Project.toml") ? ["."] : String[],
+         sort([d for d in readdir() if startswith(d, "env_") && isfile(joinpath(d, "Project.toml"))])) :
+    ARGS
+isempty(envs) && error("no Project.toml in the project root and no env_*/Project.toml")
+failed = String[]
+for env in envs
+    isfile(joinpath(root, env, "Project.toml")) || (println(stderr, "gateway: $env has no Project.toml"); push!(failed, env); continue)
+    println("==== instantiate $env")
+    try
+        Pkg.activate(joinpath(root, env))
+        Pkg.instantiate()
+        if env == "."
+            if isfile("test/Project.toml")
+                Pkg.activate("test"); Pkg.instantiate(); Pkg.activate(".")
+            else
+                p = Pkg.TOML.parsefile("Project.toml")
+                names = get(get(p, "targets", Dict()), "test", String[])
+                if !isempty(names)
+                    Pkg.activate(; temp=true); Pkg.develop(path=root); Pkg.add(names); Pkg.activate(".")
+                end
+            end
+        end
+        Pkg.precompile()
+    catch e
+        showerror(stderr, e); println(stderr); push!(failed, env)
+    end
+end
+println(isempty(failed) ? "==== ok: $(join(envs, " "))" : "==== FAILED: $(join(failed, " "))")
+isempty(failed) || exit(1)
+'
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+case "$CMD" in
+sync)
+    dir=$(project_dir "${ARGV[0]:-}")
+    new="$dir.incoming"
+    rm -rf "$new"; mkdir -p "$new"
+    head -c "$MAX_SYNC_BYTES" | tar -xz --no-same-owner --no-same-permissions -C "$new" -f -
+    # Drop symlinks that point outside the project
+    while IFS= read -r -d '' l; do
+        target=$(readlink -f "$l" || true)
+        case "$target" in "$new"|"$new"/*) ;; *) echo "gateway: removed symlink ${l#"$new"/} -> outside" >&2; rm -f "$l" ;; esac
+    done < <(find "$new" -type l -print0)
+    rm -rf "$dir"; mv "$new" "$dir"
+    echo "gateway: synced $(find "$dir" -type f | wc -l) files to ${ARGV[0]}"
+    ;;
+
+instantiate)
+    dir=$(project_dir "${ARGV[0]:-}"); [ -d "$dir" ] || die "sync first"
+    envs=("${ARGV[@]:1}")
+    for e in "${envs[@]}"; do
+        [[ "$e" == . || "$e" =~ ^env_[A-Za-z0-9_.-]+$ && "$e" != *..* ]] || die "instantiate: '$e' is not . or env_<name>"
+    done
+    exec 9>"$BASE/.instantiate.lock"; flock -w 600 9 || die "another instantiate is running"
+    itmp=$(mktemp -d "$BASE/tmp/instantiate.XXXXXX")
+    trap 'rm -rf "$itmp"' EXIT
+    if [ -n "$APPTAINER_IMAGE" ]; then
+        eval "timeout $TIMEOUT_SETUP $(apptainer_cmd "$dir" "$(printf %q "$itmp")" env JULIA_DEPOT_PATH=/depot JULIA_PKG_SERVER="$PKG_SERVER" julia --project=/work -e "$INSTANTIATE_JL" "${envs[@]}")"
+    else
+        # Login shell so `module` from JOB_SETUP works
+        JOB_SETUP="$JOB_SETUP" JULIA="$JULIA" JULIA_DEPOT_PATH="$BASE/depot" JULIA_PKG_SERVER="$PKG_SERVER" TMPDIR="$itmp" \
+            timeout "$TIMEOUT_SETUP" bash -lc 'eval "$JOB_SETUP"; cd "$1" || exit 1; jl=$2; shift 2; exec "$JULIA" --project=. -e "$jl" "$@"' _ "$dir" "$INSTANTIATE_JL" "${envs[@]}"
+    fi
+    ;;
+
+submit)
+    project=${ARGV[0]:-}; dir=$(project_dir "$project"); [ -d "$dir" ] || die "sync first"
+    script=${ARGV[1]:-}
+    [[ "$script" =~ ^[A-Za-z0-9_][A-Za-z0-9._/-]*$ && "$script" != *..* ]] \
+        || die "submit needs a script path inside the project, got '$script'"
+    [ -f "$dir/$script" ] || die "no such file in project: $script"
+
+    time=$MAX_TIME_MIN gpus=0 cpus=1 mem=4 partition= gputype=
+    rest=("${ARGV[@]:2}"); args=()
+    while [ ${#rest[@]} -gt 0 ]; do
+        a=${rest[0]}; rest=("${rest[@]:1}")
+        case "$a" in
+            time=*)      time=${a#*=} ;;
+            gpus=*)      gpus=${a#*=} ;;
+            gputype=*)   gputype=${a#*=} ;;
+            cpus=*)      cpus=${a#*=} ;;
+            mem=*)       mem=${a#*=} ;;
+            partition=*) partition=${a#*=} ;;
+            --)          args=("${rest[@]}"); break ;;
+            *)           die "unknown option '$a' (use key=value, script args after --)" ;;
+        esac
+    done
+    for v in time gpus cpus mem; do is_uint "${!v}" || die "$v must be a whole number"; done
+    if [ -n "$gputype" ]; then
+        [ "$gpus" -ge 1 ] || die "gputype= needs gpus>=1"
+        [[ " $GPU_TYPES " == *" $gputype "* ]] || die "gputype '$gputype' not allowed (allowed: ${GPU_TYPES:-none})"
+    fi
+    [ "$time" -ge 1 ] && [ "$time" -le "$MAX_TIME_MIN" ] || die "time must be 1..$MAX_TIME_MIN minutes"
+    [ "$gpus" -le "$MAX_GPUS" ] || die "gpus must be <= $MAX_GPUS"
+    [ "$cpus" -ge 1 ] && [ "$cpus" -le "$MAX_CPUS" ] || die "cpus must be 1..$MAX_CPUS"
+    [ "$mem" -ge 1 ] && [ "$mem" -le "$MAX_MEM_GB" ] || die "mem must be 1..$MAX_MEM_GB GB"
+    # Partition: separate allowlists for GPU and CPU jobs; "auto" = no --partition
+    if [ "$gpus" -gt 0 ]; then
+        partition=${partition:-$DEFAULT_GPU_PARTITION}
+        [[ " $GPU_PARTITIONS " == *" ${partition:-auto} "* ]] \
+            || die "GPU jobs may use partition: $GPU_PARTITIONS (auto = let the cluster route the job), got '$partition'"
+    else
+        partition=${partition:-$DEFAULT_PARTITION}
+        if [ -n "$partition" ] && [ "$partition" != auto ]; then
+            [[ " $PARTITIONS " == *" $partition "* ]] \
+                || die "CPU jobs may use partition: ${PARTITIONS:-<cluster default>}, got '$partition'${GPU_PARTITIONS:+ (GPU partitions need gpus>=1)}"
+        fi
+    fi
+    [ "$partition" = auto ] && partition=
+    n=$(active_jobs)
+    [ "$n" -lt "$MAX_ACTIVE" ] || die "already $n active gateway jobs (max $MAX_ACTIVE); wait or cancel one"
+
+    # Snapshot of the code for this job, so a later `sync` can't change it
+    find "$BASE/runs" -mindepth 1 -maxdepth 1 -type d -mtime "+$RUNS_KEEP_DAYS" -exec rm -rf {} + 2>/dev/null || true
+    stamp="$project-$(date +%Y%m%d-%H%M%S)-$$"
+    run="$BASE/runs/$stamp"
+    cp -a "$dir" "$run"
+    touch "$run/.snapshot-time"   # fetch only returns files written after this
+
+    # Wrapper job script (this is what gets submitted)
+    wrapper="$BASE/jobs/$stamp.sh"
+    {
+        echo '#!/bin/bash -l'
+        echo "# generated by claude-slurm-gateway for $project/$script"
+        echo 'set -eo pipefail'
+        [ -n "$JOB_SETUP" ] && echo "$JOB_SETUP"
+        # Private /tmp on the compute node's local disk, removed afterwards
+        if [ -n "$JOB_TMP_BASE" ]; then
+            printf 'JOBTMP=%q/claude-"${SLURM_JOB_ID:-$$}"\n' "$JOB_TMP_BASE"
+        else
+            printf 'JOBTMP="${TMPDIR:-/tmp}/claude-${SLURM_JOB_ID:-$$}"\n'
+        fi
+        echo 'mkdir -p -m 700 "$JOBTMP"'
+        echo 'rc=0'
+        if [ -n "$APPTAINER_IMAGE" ]; then
+            printf '%s' "$(apptainer_cmd "$run" '"$JOBTMP"' env JULIA_DEPOT_PATH=/depot JULIA_PKG_OFFLINE=true)"
+            printf 'SLURM_JOB_ID="$SLURM_JOB_ID" SLURM_CPUS_PER_TASK="${SLURM_CPUS_PER_TASK:-1}" JULIA_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}" '
+            # GPUs Slurm assigned to this job (--cleanenv drops them). Only passed when
+            # set: an empty CUDA_VISIBLE_DEVICES would hide every GPU.
+            for v in CUDA_VISIBLE_DEVICES ROCR_VISIBLE_DEVICES HIP_VISIBLE_DEVICES; do
+                printf '${%s+"%s=$%s"} ' "$v" "$v" "$v"
+            done
+            printf '%q ' bash "/work/$script" "${args[@]+"${args[@]}"}"; echo '|| rc=$?'
+        else
+            printf 'cd %q\n' "$run"
+            printf 'export TMPDIR="$JOBTMP" JULIA_DEPOT_PATH=%q JULIA_PKG_OFFLINE=true JULIA_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"\n' "$BASE/depot"
+            printf '%q ' bash "$run/$script" "${args[@]+"${args[@]}"}"; echo '|| rc=$?'
+        fi
+        echo 'rm -rf "$JOBTMP"'
+        echo 'exit $rc'
+    } > "$wrapper"
+    chmod 700 "$wrapper"
+
+    # --open-mode=append: preempted+requeued jobs (e.g. gpuidle) keep the log of every attempt
+    sb=(sbatch --parsable --job-name="claude-$project" --output="$BASE/logs/%j.out" --error="$BASE/logs/%j.out" --open-mode=append
+        --nodes=1 --ntasks=1 --cpus-per-task="$cpus" --mem="${mem}G" --time="$time")
+    if [ -n "$gputype" ]; then sb+=("$(printf -- "$GPU_TYPE_ARG" "$gputype" "$gpus")")
+    elif [ "$gpus" -gt 0 ]; then sb+=("$(printf -- "$GPU_ARG" "$gpus")"); fi
+    [ -n "$partition" ] && sb+=(--partition="$partition")
+    [ -n "$ACCOUNT" ] && sb+=(--account="$ACCOUNT")
+    # The gateway's flags are the only source of job options: drop SBATCH_* env vars
+    while IFS= read -r v; do unset "$v"; done < <(compgen -e | grep '^SBATCH_' || true)
+    jobid=$("${sb[@]}" "$wrapper" | cut -d';' -f1)
+    [[ "$jobid" =~ ^[0-9]+$ ]] || die "sbatch failed: $jobid"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$jobid" "$project" "$script" "$(date -Is)" "$stamp" >> "$BASE/jobs.tsv"
+    echo "$jobid" > "$run/.slurm-job-id"
+    log "submitted $jobid: $project/$script time=$time gpus=$gpus${gputype:+ gputype=$gputype} cpus=$cpus mem=${mem}G partition=${partition:-auto}"
+    echo "Submitted job $jobid (time=${time}min gpus=$gpus${gputype:+ gputype=$gputype} cpus=$cpus mem=${mem}G partition=${partition:-auto})"
+    echo "Follow with: log $jobid"
+    ;;
+
+fetch)
+    own_job "${ARGV[0]:-}"; jobid=${ARGV[0]}
+    pattern=${ARGV[1]:-$FETCH_PATTERN}
+    [[ "$pattern" =~ ^[A-Za-z0-9._*?-]+$ ]] || die "invalid file pattern '$pattern'"
+    run=$(run_dir_of "$jobid") || die "can't find the run directory of job $jobid (deleted after $RUNS_KEEP_DAYS days, or not identifiable)"
+    if [ -f "$run/.slurm-job-id" ] && [ "$(cat "$run/.slurm-job-id")" != "$jobid" ]; then
+        die "run directory ${run##*/} belongs to job $(cat "$run/.slurm-job-id"), not $jobid"
+    fi
+    tmpd=$(mktemp -d "$BASE/tmp/fetch.XXXXXX"); trap 'rm -rf "$tmpd"' EXIT
+    # Regular files only (find doesn't follow symlinks), paths relative to the run dir
+    # Only what the job wrote: skip results fetched earlier that came back with a sync
+    # (data/<jobid>/), and anything already in the code snapshot (older gateways lack the marker)
+    newer=(); [ -f "$run/.snapshot-time" ] && newer=(-newer "$run/.snapshot-time")
+    (cd "$run" && find . -regextype posix-extended -regex '\./data/[0-9]+' -prune \
+        -o -type f -name "$pattern" "${newer[@]}" -print0) > "$tmpd/list"
+    n=$(tr -cd '\0' < "$tmpd/list" | wc -c)
+    [ "$n" -gt 0 ] || die "no files matching '$pattern' in job $jobid"
+    size=$(cd "$run" && xargs -0 stat -c %s < "$tmpd/list" | awk '{s += $1} END {print s + 0}')
+    [ "$size" -le "$MAX_FETCH_BYTES" ] || die "$n files, $size bytes: more than MAX_FETCH_BYTES ($MAX_FETCH_BYTES). Use a narrower pattern."
+    { echo "job:      $jobid"
+      awk -F'\t' -v j="$jobid" '$1 == j {print "project:  " $2; print "script:   " $3; print "submit:   " $4}' "$BASE/jobs.tsv"
+      echo "run dir:  $(basename "$run")"
+      echo "fetched:  $(date -Is), pattern $pattern, $n files"
+      echo
+      sacct -X -P -j "$jobid" -o JobID,State,ExitCode,Elapsed,Start,End,Partition,NodeList,AllocTRES 2>/dev/null || true
+    } > "$tmpd/job-info.txt"
+    log "fetch $jobid: $n files, $size bytes, pattern $pattern"
+    echo "gateway: sending $n files ($(numfmt --to=iec "$size")) from job $jobid" >&2
+    tar -czf - -C "$run" --null -T "$tmpd/list" -C "$tmpd" job-info.txt
+    ;;
+
+status)
+    filter=${ARGV[0]:-}
+    [ -z "$filter" ] || project_dir "$filter" >/dev/null
+    ids=$(awk -F'\t' -v p="$filter" 'p == "" || $2 == p {print $1}' "$BASE/jobs.tsv" | tail -n 20 | paste -sd, -)
+    [ -n "$ids" ] || { echo "No gateway jobs yet."; exit 0; }
+    echo "== Queue"
+    printf '%-10s %-24s %-11s %-10s %-10s %s\n' JOBID NAME STATE TIME LIMIT REASON
+    our_queue | awk -F'|' -v p="$filter" '(p == "" || $2 == "claude-" p) {printf "%-10s %-24s %-11s %-10s %-10s %s\n", $1, $2, $3, $4, $5, $7}'
+    echo "== Recent (last 20)"
+    sacct -X -j "$ids" -o JobID,JobName%24,State,Elapsed,ExitCode,NodeList%12,AllocTRES%50 2>/dev/null || true
+    ;;
+
+log)
+    own_job "${ARGV[0]:-}"
+    lines=${ARGV[1]:-100}; is_uint "$lines" || die "lines must be a number"
+    f="$BASE/logs/${ARGV[0]}.out"
+    [ -f "$f" ] || die "no output yet for job ${ARGV[0]} (still pending?)"
+    tail -n "$lines" "$f"
+    ;;
+
+cancel)
+    own_job "${ARGV[0]:-}"
+    scancel "${ARGV[0]}"
+    log "cancelled ${ARGV[0]}"
+    echo "gateway: cancelled ${ARGV[0]}"
+    ;;
+
+info)
+    echo "Limits: time<=${MAX_TIME_MIN}min gpus<=$MAX_GPUS cpus<=$MAX_CPUS mem<=${MAX_MEM_GB}G active<=$MAX_ACTIVE"
+    echo "CPU partitions: ${PARTITIONS:-<cluster default>}${DEFAULT_PARTITION:+ (default $DEFAULT_PARTITION)}"
+    echo "GPU partitions: $GPU_PARTITIONS (default $DEFAULT_GPU_PARTITION; auto = cluster routes the job)"
+    echo "GPU types allowed (gputype=): ${GPU_TYPES:-none}"
+    echo "GPU types on the cluster: $( { sinfo -h -o '%G' 2>/dev/null || true; } | tr ',' '\n' | grep -o 'gpu:[A-Za-z0-9_.-]*:' | cut -d: -f2 | sort -u | paste -sd' ' -)"
+    if [ -n "$APPTAINER_IMAGE" ]; then echo "Mode: apptainer ($APPTAINER_IMAGE)"
+    else echo "Mode: plain bash (job runs unconfined with your account's rights)"; fi
+    if [ -n "$PARTITIONS" ]; then
+        # shellcheck disable=SC2086
+        sinfo -s -p "$(echo $PARTITIONS | tr ' ' ,)" 2>/dev/null || true
+    fi
+    ;;
+
+help)
+    sed -n '8,15p' "$0" | sed 's/^# \{0,3\}//'
+    ;;
+*)
+    echo "gateway: unknown command '$CMD'. Allowed:" >&2
+    sed -n '8,15p' "$0" | sed 's/^# \{0,3\}//' >&2
+    exit 2
+    ;;
+esac

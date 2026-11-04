@@ -1,0 +1,6 @@
+# Rootless Podman: map your host user to `agent` (uid 1000) inside, so files in
+# the workspace keep your ownership.
+#   podman compose -f compose.yaml -f compose.podman.yaml up -d
+services:
+  agent:
+    userns_mode: keep-id:uid=1000,gid=1000

@@ -1,0 +1,4 @@
+# Bridge network for the gateway of agent-sandbox instance "@NAME@".
+# The agent container has no network of its own; it joins the gateway's namespace.
+[Network]
+NetworkName=@NAME@

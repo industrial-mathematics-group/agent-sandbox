@@ -1,0 +1,56 @@
+#!/bin/bash
+# gpu: run this project's Julia code on the remote GPU server.
+#
+#   gpu sync                     upload /workspace (git-tracked + untracked, not ignored)
+#   gpu instantiate              install dependencies there (with network)
+#   gpu test [args...]           Pkg.test() on a GPU (no network)
+#   gpu run <file.jl> [args...]  run a script from the project on a GPU (no network)
+#   gpu check [args...]          sync + test
+#   gpu status | kill | clean
+#
+#   --gpu N   (before the command) pick a specific GPU index, default: least busy
+#
+# The server only accepts these commands (forced-command SSH key); everything
+# runs there in a bubblewrap sandbox without access to the rest of the server.
+set -euo pipefail
+
+: "${GPU_HOST:?GPU_HOST is not set (see addons/gpu-remote/README.md)}"
+GPU_USER=${GPU_USER:?GPU_USER is not set}
+KEY_DIR=${GPU_SSH_DIR:-/run/gpu-ssh}
+PROJECT=${GPU_PROJECT:-default}
+
+ssh_gw() {
+    ssh -T -o BatchMode=yes -o IdentitiesOnly=yes \
+        -i "$KEY_DIR/id_ed25519" \
+        -o UserKnownHostsFile="$KEY_DIR/known_hosts" -o StrictHostKeyChecking=yes \
+        -o ServerAliveInterval=30 -o ConnectTimeout=15 \
+        ${GPU_PORT:+-p "$GPU_PORT"} "$GPU_USER@$GPU_HOST" "$@"
+}
+
+usage() { sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; }
+
+gpu_opt=()
+if [ "${1:-}" = "--gpu" ]; then gpu_opt=("gpu=${2:?--gpu needs an index}"); shift 2; fi
+cmd=${1:-help}; shift || true
+
+do_sync() {
+    cd "${GPU_WORKSPACE:-/workspace}"
+    if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        # tracked + untracked-but-not-ignored files that exist
+        git ls-files -co --exclude-standard -z \
+            | while IFS= read -r -d '' f; do [ -e "$f" ] && printf '%s\0' "$f"; done \
+            | tar --null -T - -cz
+    else
+        tar -cz --exclude=.git .
+    fi | ssh_gw "${gpu_opt[@]}" sync "$PROJECT"
+}
+
+case "$cmd" in
+    sync)                  do_sync ;;
+    instantiate|test|run)  ssh_gw "${gpu_opt[@]}" "$cmd" "$PROJECT" "$@" ;;
+    check)                 do_sync && ssh_gw "${gpu_opt[@]}" test "$PROJECT" "$@" ;;
+    status|kill)           ssh_gw "$cmd" ;;
+    clean)                 ssh_gw clean "$PROJECT" ;;
+    help|-h|--help)        usage ;;
+    *)                     usage; exit 2 ;;
+esac

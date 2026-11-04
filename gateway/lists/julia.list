@@ -1,0 +1,6 @@
+# Julia: package servers (pkg.julialang.org redirects to a regional one) and the
+# storage they redirect package/artifact tarballs to.
+pkg.julialang.org
+*.pkg.julialang.org
+storage.julialang.net
+julialang-s3.julialang.org

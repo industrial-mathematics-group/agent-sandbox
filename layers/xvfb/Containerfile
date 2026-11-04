@@ -1,0 +1,24 @@
+# General add-on layer: virtual X display (Xvfb) + Mesa software OpenGL
+# (llvmpipe, OpenGL 4.5 core). For GLMakie, VTK/OCP (build123d), anything that
+# needs an X server or libGL. Works on top of any language image.
+ARG BASE=localhost/agent-sandbox-stage:base
+FROM ${BASE}
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+USER root
+
+# The second group: X/GL client libs needed by e.g. the VTK-enabled cadquery-ocp
+# wheel. GLFW and most X11 libs for Julia come from its own JLL artifacts; libGL
+# must come from the system.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      xvfb xauth mesa-utils \
+      libgl1 libglx-mesa0 libgl1-mesa-dri libegl1 libglu1-mesa \
+      libxrender1 libxext6 libxcursor1 libxi6 libxinerama1 libxft2 libxrandr2 \
+      libxkbcommon0 libfontconfig1 fonts-liberation \
+    && apt-get clean && rm -rf /var/lib/apt/lists/* \
+ && mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix \
+ && xvfb-run -a -s "-screen 0 640x480x24" glxinfo -B \
+      | tee /dev/stderr | grep -Eq "OpenGL core profile version string: ([4-9]|3\.[3-9])"
+
+ENV DISPLAY=:99
+COPY --chmod=0644 entrypoint.d/ /usr/local/lib/agent-sandbox/entrypoint.d/
+COPY --chmod=0644 claude-md/ /usr/share/agent-sandbox/claude-md/

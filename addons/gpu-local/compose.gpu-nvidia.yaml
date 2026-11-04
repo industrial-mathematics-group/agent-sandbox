@@ -1,0 +1,7 @@
+# Local NVIDIA GPU through CDI (Docker >= 25 with CDI enabled, or Podman).
+# Host: nvidia-container-toolkit + `sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml`.
+#   docker compose -f compose.yaml -f ../../addons/gpu-local/compose.gpu-nvidia.yaml up -d
+services:
+  agent:
+    devices:
+      - nvidia.com/gpu=all

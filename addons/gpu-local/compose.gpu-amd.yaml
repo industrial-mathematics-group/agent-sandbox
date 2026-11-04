@@ -1,0 +1,14 @@
+# Local AMD GPU (ROCm). Use with the full-rocm flavor:
+#   FLAVOR=full-rocm docker compose -f compose.yaml -f ../../addons/gpu-local/compose.gpu-amd.yaml up -d
+# VIDEO_GID / RENDER_GID: the host's group ids (getent group video render).
+services:
+  agent:
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - "${VIDEO_GID:-44}"
+      - "${RENDER_GID:-105}"
+    environment:
+      KEEP_GROUPS: "1"
+      ROCM_PATH: /opt/rocm

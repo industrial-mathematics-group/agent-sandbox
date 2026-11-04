@@ -1,0 +1,106 @@
+#!/bin/bash
+# slurm: run jobs from this project on the HPC cluster via the restricted gateway.
+#
+#   slurm sync                          upload the project (git-tracked + untracked, not ignored)
+#   slurm instantiate [env_x ...]       install Julia deps on the cluster (root + all env_* by default)
+#   slurm submit <script.sh> [time=MIN] [gpus=N] [gputype=T] [cpus=N] [mem=GB] [partition=P] [-- args...]
+#   slurm run <script.sh> [...]         sync + submit
+#   slurm fetch <jobid>... [--pattern GLOB]   copy result files (default *.jld2) to <project>/data/<jobid>/
+#   slurm status | log <jobid> [lines] | cancel <jobid> | info
+#
+# Resources are set ONLY via the key=value options (#SBATCH lines in the
+# script are ignored). The script runs with the project as working directory.
+set -euo pipefail
+
+: "${SLURM_HOST:?SLURM_HOST is not set}"
+SLURM_USER=${SLURM_USER:?SLURM_USER is not set}
+KEY_DIR=${SLURM_SSH_DIR:-/run/slurm-ssh}
+# Project root (git top level) and its name on the cluster
+TOP=$(git -C "${SLURM_WORKSPACE:-$PWD}" rev-parse --show-toplevel 2>/dev/null || echo "${SLURM_WORKSPACE:-$PWD}")
+if [ -n "${SLURM_PROJECT:-}" ]; then
+    PROJECT=$SLURM_PROJECT
+else
+    PROJECT=$(basename "$TOP" | tr -c 'A-Za-z0-9._\n-' '_')
+fi
+
+gw() {
+    ssh -T -o BatchMode=yes -o IdentitiesOnly=yes \
+        -i "$KEY_DIR/id_ed25519" \
+        -o UserKnownHostsFile="$KEY_DIR/known_hosts" -o StrictHostKeyChecking=yes \
+        -o ServerAliveInterval=30 -o ConnectTimeout=15 \
+        "$SLURM_USER@$SLURM_HOST" "$@"
+}
+usage() { sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; }
+
+do_fetch() {
+    local pattern="" ids=() id dest n tmp rc=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --pattern) pattern=${2:?--pattern needs a glob}; shift 2 ;;
+            *)         ids+=("$1"); shift ;;
+        esac
+    done
+    [ ${#ids[@]} -gt 0 ] || { usage; exit 2; }
+    for id in "${ids[@]}"; do
+        [[ "$id" =~ ^[0-9]+$ ]] || { echo "invalid job id '$id'" >&2; exit 2; }
+        dest="$TOP/data/$id"
+        mkdir -p "$TOP/data"
+        tmp=$(mktemp "$TOP/data/.fetch-$id.XXXXXX")   # same disk as the result, not /tmp
+        # Download completely first, extract only if the gateway succeeded.
+        # ${pattern:+...}: only send the pattern if one was given (gateway default otherwise)
+        # Extract next to the target, then replace data/<id> as a whole, so files from an
+        # earlier fetch (other pattern, or an older gateway) can't linger and get mixed in.
+        if gw fetch "$id" ${pattern:+"$pattern"} > "$tmp" && [ -s "$tmp" ] \
+           && rm -rf "$dest.part" && mkdir -p "$dest.part" \
+           && tar -xzf "$tmp" --no-same-owner --no-same-permissions -C "$dest.part" \
+           && rm -rf "$dest" && mv "$dest.part" "$dest"; then
+            n=$(find "$dest" -type f ! -name job-info.txt | wc -l)
+            echo "job $id: $n files -> ${dest#"$TOP"/}/"
+        else
+            rm -rf "$dest.part"
+            echo "job $id: fetch failed (see message above)" >&2; rc=1
+        fi
+        rm -f "$tmp"
+    done
+    return $rc
+}
+
+do_sync() {
+    cd "${SLURM_WORKSPACE:-$PWD}"
+    if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        cd "$(git rev-parse --show-toplevel)"
+        # Files git knows (tracked + untracked, not ignored), PLUS Julia's environment
+        # files even when .gitignore excludes them (Manifest.toml often is): without the
+        # manifest the cluster would resolve its own, possibly different, versions.
+        { git ls-files -co --exclude-standard -z
+          for d in . env_* test docs; do
+              [ -f "$d/Project.toml" ] || continue
+              for f in "$d"/Manifest.toml "$d"/Manifest-v*.toml "$d"/JuliaManifest.toml "$d"/LocalPreferences.toml; do
+                  [ -f "$f" ] && printf '%s\0' "${f#./}"
+              done
+          done
+        } | sort -zu \
+            | while IFS= read -r -d '' f; do
+                  # data/<jobid>/ = results fetched back from the cluster: never upload them again
+                  [[ "$f" =~ ^data/[0-9]+(\.part)?/ || "$f" == data/.fetch-* ]] && continue
+                  [ -e "$f" ] && printf '%s\0' "$f"
+              done \
+            | tar --null -T - -cz
+    else
+        tar -cz --exclude=.git --exclude='./data/[0-9]*' --exclude='./data/.fetch-*' .
+    fi | gw sync "$PROJECT"
+}
+
+cmd=${1:-help}; shift || true
+case "$cmd" in
+    sync)          do_sync ;;
+    instantiate)   do_sync && gw instantiate "$PROJECT" "$@" ;;   # sync first: env_* must be on the cluster
+    submit)        gw submit "$PROJECT" "$@" ;;
+    run)           do_sync && gw submit "$PROJECT" "$@" ;;
+    fetch)         do_fetch "$@" ;;
+    status)        gw status "$PROJECT" ;;
+    log|cancel)    gw "$cmd" "$@" ;;
+    info)          gw info ;;
+    help|-h|--help) usage ;;
+    *)             usage; exit 2 ;;
+esac
