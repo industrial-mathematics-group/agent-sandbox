@@ -1,7 +1,8 @@
 # Node.js (LTS) + corepack (pnpm, yarn) for web development.
-# Node is copied from the official image instead of apt, so it is the current LTS
-# and matches what most projects test against.
-ARG NODE_VERSION=24
+# Node is copied from the official image instead of apt, so it doesn't depend on
+# what Debian packages: any major with a trixie image works (NODE_VERSION=24, 26 …).
+# Node 25+ no longer bundles corepack; it is then installed from npm.
+ARG NODE_VERSION=26
 ARG BASE=localhost/agent-sandbox-stage:base
 FROM docker.io/library/node:${NODE_VERSION}-trixie-slim AS node
 
@@ -14,10 +15,12 @@ COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
  && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
  && if [ -d /usr/local/lib/node_modules/corepack ]; then \
-      ln -s ../lib/node_modules/corepack/dist/corepack.js /usr/local/bin/corepack \
-      && corepack enable --install-directory /usr/local/bin; \
+      ln -s ../lib/node_modules/corepack/dist/corepack.js /usr/local/bin/corepack; \
+    else \
+      npm install -g --prefix /usr/local corepack && npm cache clean --force; \
     fi \
- && node --version && npm --version
+ && corepack enable --install-directory /usr/local/bin \
+ && node --version && npm --version && corepack --version
 
 # Global npm installs go to the (non-persistent) home: projects should declare
 # their tools as devDependencies instead.

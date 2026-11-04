@@ -27,12 +27,14 @@ declare -A CHAIN=(
     [python-gui]="images/python layers/xvfb layers/chromium"
     [julia]="images/julia"
     [julia-gui]="images/julia layers/xvfb layers/chromium"
+    [octave]="images/octave"
+    [octave-gui]="images/octave layers/xvfb"
     [full]="images/node images/python images/julia layers/xvfb layers/chromium"
     [full-rocm]="images/node images/python images/julia layers/xvfb layers/chromium layers/rocm"
 )
 # Gateway variants -> tag of agent-sandbox-gateway
 declare -A GATEWAY=( [gateway]=latest [gateway-tailscale]=tailscale )
-FLAVOR_ORDER="minimal node node-chromium python python-gui julia julia-gui full full-rocm"
+FLAVOR_ORDER="minimal node node-chromium python python-gui julia julia-gui octave octave-gui full full-rocm"
 
 ENGINE=${ENGINE:-}
 REGISTRY=localhost

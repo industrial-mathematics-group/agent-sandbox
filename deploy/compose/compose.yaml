@@ -57,6 +57,7 @@ services:
       - npm:/home/agent/.npm
       - uv-python:/home/agent/.local/share/uv
       - julia-depot:/home/agent/.julia
+      - octave:/home/agent/.local/share/octave
     cap_drop: [ALL]
     # Only for the entrypoint's switch to the unprivileged `agent` user
     cap_add: [SETUID, SETGID]
@@ -77,3 +78,4 @@ volumes:
   npm:         { name: agent-sandbox-npm }
   uv-python:   { name: agent-sandbox-uv-python }
   julia-depot: { name: agent-sandbox-julia-depot }
+  octave:      { name: agent-sandbox-octave }
