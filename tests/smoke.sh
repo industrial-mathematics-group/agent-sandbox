@@ -12,7 +12,7 @@ REGISTRY=${2:-localhost}
 TAG_SUFFIX=${TAG_SUFFIX:-}
 WORKSPACE=$(mktemp -d)
 chmod 777 "$WORKSPACE"
-export SANDBOX_NAME=smoke FLAVOR="$FLAVOR$TAG_SUFFIX" REGISTRY GATEWAY_TAG="${GATEWAY_TAG:-latest}" WORKSPACE PORT_1=3999 PORTS=3999
+export SANDBOX_NAME=smoke FLAVOR="$FLAVOR$TAG_SUFFIX" REGISTRY GATEWAY_TAG="${GATEWAY_TAG:-latest}" WORKSPACE PORT_1=3999 PORTS=3999 CPUS=1 MEMORY=4g   # limits that fit any runner
 tmp=$(mktemp -d)
 cp gateway.env.example gateway.env; cp sandbox.env.example sandbox.env; : > extra.list
 dc() { docker compose -p smoke "$@"; }

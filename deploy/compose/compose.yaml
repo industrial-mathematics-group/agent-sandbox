@@ -67,7 +67,7 @@ services:
     pids_limit: 4096
     shm_size: 1gb
     mem_limit: ${MEMORY:-16g}
-    cpus: ${CPUS:-8}
+    cpus: ${CPUS:-0}                 # 0 = no limit; must not exceed the host's CPUs
     command: ["sleep", "infinity"]
     restart: unless-stopped
 
