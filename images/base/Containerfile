@@ -8,6 +8,8 @@ ARG DEBIAN_IMAGE=docker.io/library/debian:trixie-slim
 FROM ${DEBIAN_IMAGE}
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+# Build-time only (ARG, not ENV): no debconf prompts during apt
+ARG DEBIAN_FRONTEND=noninteractive
 
 # build-essential + pkg-config: native modules (node-gyp), Python sdists, Julia
 # packages that compile at build time. netcat-openbsd: SSH through the gateway proxy.
@@ -28,18 +30,10 @@ RUN groupadd -g 1000 agent \
  && touch /commandhistory/.zsh_history \
  && chown -R agent:agent /workspace /commandhistory /home/agent
 
-# The gateway runs a filtering HTTP(S) proxy on 127.0.0.1:3128 inside the shared
-# network namespace. Direct connections from this container are blocked, so every
-# tool has to go through it. NODE_USE_ENV_PROXY makes Node's built-in fetch honour it.
+# The proxy variables (HTTPS_PROXY=127.0.0.1:3128 -> gateway) are set only in the
+# final images/claude step: set here, they would break every later build step.
 ENV LANG=en_US.UTF-8 \
     TZ=Etc/UTC \
-    HTTP_PROXY=http://127.0.0.1:3128 \
-    HTTPS_PROXY=http://127.0.0.1:3128 \
-    http_proxy=http://127.0.0.1:3128 \
-    https_proxy=http://127.0.0.1:3128 \
-    NO_PROXY=localhost,127.0.0.1,::1 \
-    no_proxy=localhost,127.0.0.1,::1 \
-    NODE_USE_ENV_PROXY=1 \
     DEVCONTAINER=true \
     AGENT_SANDBOX=1 \
     SHELL=/bin/zsh \
@@ -58,12 +52,16 @@ WORKDIR /workspace
 
 USER agent
 ARG ZSH_IN_DOCKER_VERSION=1.2.0
-RUN sh -c "$(wget -qO- https://github.com/deluan/zsh-in-docker/releases/download/v${ZSH_IN_DOCKER_VERSION}/zsh-in-docker.sh)" -- \
+# Download first: `sh -c "$(wget …)"` would silently do nothing if the download failed
+RUN wget -qO /tmp/zsh-in-docker.sh "https://github.com/deluan/zsh-in-docker/releases/download/v${ZSH_IN_DOCKER_VERSION}/zsh-in-docker.sh" \
+ && sh /tmp/zsh-in-docker.sh \
       -p git -p fzf \
       -a "source /usr/share/doc/fzf/examples/key-bindings.zsh" \
       -a "source /usr/share/doc/fzf/examples/completion.zsh" \
       -a "export HISTFILE=/commandhistory/.zsh_history" \
       -x \
+ && rm -f /tmp/zsh-in-docker.sh \
+ && test -d /home/agent/.oh-my-zsh \
  && git config --global core.pager delta \
  && git config --global interactive.diffFilter 'delta --color-only'
 USER root

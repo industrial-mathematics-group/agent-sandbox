@@ -21,6 +21,18 @@ RUN tmp=$(mktemp -d) \
  && rm -rf "$tmp" \
  && claude --version
 
+# Runtime network: the gateway runs a filtering HTTP(S) proxy on 127.0.0.1:3128
+# inside the shared network namespace. Direct connections are blocked, so every
+# tool has to go through it. NODE_USE_ENV_PROXY makes Node's built-in fetch honour
+# it. Set at the end on purpose: a later RUN step that downloads would go to the proxy.
+ENV HTTP_PROXY=http://127.0.0.1:3128 \
+    HTTPS_PROXY=http://127.0.0.1:3128 \
+    http_proxy=http://127.0.0.1:3128 \
+    https_proxy=http://127.0.0.1:3128 \
+    NO_PROXY=localhost,127.0.0.1,::1 \
+    no_proxy=localhost,127.0.0.1,::1 \
+    NODE_USE_ENV_PROXY=1
+
 ENV DISABLE_AUTOUPDATER=1 \
     CLAUDE_CONFIG_DIR=/home/agent/.claude \
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1

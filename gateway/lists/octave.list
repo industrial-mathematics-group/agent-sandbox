@@ -1,0 +1,7 @@
+# GNU Octave: Octave Forge package index and downloads for `pkg install -forge`.
+# Most packages are released on GitHub (covered by base.list).
+packages.octave.org
+gnu-octave.github.io
+octave.sourceforge.io
+downloads.sourceforge.net
+*.dl.sourceforge.net

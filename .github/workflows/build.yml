@@ -76,7 +76,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        flavor: [minimal, node, node-chromium, python, python-gui, julia, julia-gui, full, full-rocm]
+        flavor: [minimal, node, node-chromium, python, python-gui, julia, julia-gui, octave, octave-gui, full, full-rocm]
         arch: [amd64, arm64]
         exclude:
           - { flavor: full-rocm, arch: arm64 }   # ROCm is amd64 only
@@ -109,7 +109,7 @@ jobs:
     runs-on: ubuntu-24.04
     strategy:
       matrix:
-        flavor: [minimal, node, node-chromium, python, python-gui, julia, julia-gui, full, full-rocm]
+        flavor: [minimal, node, node-chromium, python, python-gui, julia, julia-gui, octave, octave-gui, full, full-rocm]
     env:
       IMG: ${{ needs.versions.outputs.registry }}/agent-sandbox
     steps:

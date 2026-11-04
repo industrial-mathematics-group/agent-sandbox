@@ -8,7 +8,7 @@
 #   --name NAME          instance name (default: agent). One instance = one gateway +
 #                        one agent container; run several for several projects.
 #   --flavor FLAVOR      image flavor: minimal node node-chromium python python-gui
-#                        julia julia-gui full full-rocm (default: full)
+#                        julia julia-gui octave octave-gui full full-rocm (default: full)
 #   --workspace DIR      host folder mounted as /workspace
 #                        (default: /var/srv/agent-sandbox/<name>)
 #   --net plain|tailscale   egress directly (default) or only via a Tailscale exit node
@@ -74,7 +74,7 @@ done
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 [[ "$NAME" =~ ^[a-z][a-z0-9-]{0,30}$ ]] || die "--name: lowercase letters, digits and '-' only"
-case "$FLAVOR" in minimal|node|node-chromium|python|python-gui|julia|julia-gui|full|full-rocm) ;; *) die "unknown flavor $FLAVOR" ;; esac
+case "$FLAVOR" in minimal|node|node-chromium|python|python-gui|julia|julia-gui|octave|octave-gui|full|full-rocm) ;; *) die "unknown flavor $FLAVOR" ;; esac
 case "$NET" in plain|tailscale) ;; *) die "--net must be plain or tailscale" ;; esac
 case "$MODE" in standard|strict|open) ;; *) die "--mode must be standard, strict or open" ;; esac
 case "$GPU" in ""|amd|nvidia) ;; *) die "--gpu must be amd or nvidia" ;; esac
@@ -95,6 +95,7 @@ if [ -z "$PROFILES" ]; then
         node|node-*)      PROFILES=node ;;
         python|python-*)  PROFILES=python ;;
         julia|julia-*)    PROFILES=julia ;;
+        octave|octave-*)  PROFILES=octave ;;
         full)             PROFILES=node,python,julia ;;
     esac
 fi
@@ -102,6 +103,7 @@ LANG_VOLUMES=()
 case "$base_flavor" in node*|full) LANG_VOLUMES+=("Volume=agent-sandbox-npm:/home/agent/.npm") ;; esac
 case "$base_flavor" in python*|full) LANG_VOLUMES+=("Volume=agent-sandbox-uv-python:/home/agent/.local/share/uv") ;; esac
 case "$base_flavor" in julia*|full) LANG_VOLUMES+=("Volume=agent-sandbox-julia-depot:/home/agent/.julia") ;; esac
+case "$base_flavor" in octave*) LANG_VOLUMES+=("Volume=agent-sandbox-octave:/home/agent/.local/share/octave") ;; esac
 
 # Users and paths
 ME=$(id -un)

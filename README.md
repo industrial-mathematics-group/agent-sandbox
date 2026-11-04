@@ -43,6 +43,8 @@ All images: `ghcr.io/OWNER/agent-sandbox:<flavor>` (also `<flavor>-YYYYMMDD` and
 | `python-gui` | base + python + xvfb + chromium | CAD (build123d), plotting, browser checks |
 | `julia` | base + julia | Julia packages |
 | `julia-gui` | base + julia + xvfb + chromium | GLMakie, WGLMakie tests |
+| `octave` | base + octave | MATLAB-style code with GNU Octave (+ signal, statistics, control, optim, io, image, symbolic) |
+| `octave-gui` | base + octave + xvfb | Octave with plots rendered through the virtual display |
 | `full` | base + node + python + julia + xvfb + chromium | Everything |
 | `full-rocm` | full + rocm (amd64) | AMDGPU.jl, PyTorch-ROCm |
 
@@ -51,7 +53,7 @@ Gateway: `ghcr.io/OWNER/agent-sandbox-gateway:latest` (plain) and `:tailscale`.
 | Part | Folder | Contents |
 |---|---|---|
 | base | `images/base` | Debian trixie, git, gh, delta, zsh, build tools, entrypoint |
-| language images | `images/node`, `images/python`, `images/julia` | Node LTS + corepack · uv · Julia (checksum-verified) |
+| language images | `images/node`, `images/python`, `images/julia`, `images/octave` | Node 26 LTS + corepack · uv · Julia (checksum-verified) · GNU Octave |
 | general add-ons (image layers) | `layers/xvfb`, `layers/chromium`, `layers/rocm` | Virtual X display + Mesa · headless Chromium · ROCm runtime |
 | Claude Code | `images/claude` | Native CLI, installed root-owned, auto-update off (last step of every image) |
 | gateway | `gateway` | Firewall, proxy, allowlists (`gateway/lists/*.list`) |
@@ -136,6 +138,7 @@ and `GATEWAY_EXTRA_DOMAINS`. Entries are host names; `*.example.com` matches
 | `node` | npm, yarn, JSR, nodejs.org, Playwright downloads, Prisma engines, Google Fonts |
 | `python` | PyPI, PyTorch wheels |
 | `julia` | Pkg servers, Julia storage and binaries |
+| `octave` | Octave Forge index and SourceForge downloads (`pkg install -forge`) |
 
 | `GATEWAY_MODE` | What gets out |
 |---|---|
@@ -177,7 +180,7 @@ your ACLs and keep everything else towards the sandbox denied.
 | Privileges | No sudo, `no-new-privileges`, all capabilities dropped (the entrypoint keeps SETUID/SETGID only to switch to `agent`). |
 | Resources | Memory, CPU and process limits per container, so a runaway test can't freeze the machine. |
 | Claude Code | Root-owned binary, auto-update off; updates come with the image (weekly rebuild + `podman auto-update` / `docker compose pull`). |
-| Persistence | Named volumes: `agent-sandbox-claude` (login, settings), `-history`, `-cache` (uv, npm, Playwright), `-npm`, `-uv-python`, `-julia-depot`. |
+| Persistence | Named volumes: `agent-sandbox-claude` (login, settings), `-history`, `-cache` (uv, npm, Playwright), `-npm`, `-uv-python`, `-julia-depot`, `-octave` (Forge packages). |
 
 ## Graphics, browsers, dev servers
 
