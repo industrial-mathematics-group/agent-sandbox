@@ -295,6 +295,10 @@ To keep your Claude login, copy the old volume once:
 `.github/workflows/build.yml` builds every flavor for amd64 and arm64 on push to `main`,
 weekly and on demand, smoke-tests each image against the gateway (`tests/smoke.sh`),
 pushes to `ghcr.io/<owner>`, merges multi-arch tags and signs them with cosign
-(keyless). Pull requests build and test without pushing. Replace `OWNER` in this README,
+(keyless). Pull requests build and test without pushing.
+
+`.forgejo/workflows/build.yml` is a manual (workflow_dispatch) test build for a Forgejo
+instance: it builds the flavors you pick on the runner `xeon` with Docker or Buildah,
+smoke-tests them and pushes to the Forgejo container registry (secret `REGISTRY_TOKEN`). Replace `OWNER` in this README,
 `deploy/compose/.env.example` and `deploy/quadlet/setup.sh` (or set
 `AGENT_SANDBOX_REGISTRY`) once the repository exists.

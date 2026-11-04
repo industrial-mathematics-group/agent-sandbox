@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Builds agent-sandbox images locally (Podman or Docker) and in CI.
+# Builds agent-sandbox images locally (Podman, Docker or Buildah) and in CI.
 #
 #   ./build.sh full                    # one flavor
 #   ./build.sh node python gateway     # several
 #   ./build.sh --list                  # what exists
 #   ./build.sh --registry ghcr.io/me --tag-suffix -amd64 --push node
+#   ./build.sh --engine buildah node   # daemonless (CI runners without Docker)
 #
 # Every flavor is a chain: images/base -> its layers -> images/claude.
 # Each step is a normal `podman/docker build` with --build-arg BASE=<previous
