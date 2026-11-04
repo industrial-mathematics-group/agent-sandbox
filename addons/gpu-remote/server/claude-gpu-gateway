@@ -1,0 +1,255 @@
+#!/bin/bash
+# claude-gpu-gateway: the ONLY thing the Claude sandbox's SSH key can run.
+#
+# Installed as a forced command in ~/.ssh/authorized_keys:
+#   restrict,command="~/.local/bin/claude-gpu-gateway" ssh-ed25519 AAAA... claude-sandbox
+#
+# The client's requested command arrives in $SSH_ORIGINAL_COMMAND and is
+# parsed here (never passed to a shell). Allowed:
+#   [gpu=N|auto] sync        <project>            tar.gz on stdin -> project copy
+#   [gpu=N|auto] instantiate <project>            install deps (WITH network)
+#   [gpu=N|auto] test        <project> [args...]  Pkg.test (NO network)
+#   [gpu=N|auto] run         <project> <file.jl> [args...]   (NO network)
+#                status                           nvidia-smi + current run
+#                kill                             stop the current run
+#                clean       <project>            delete the project copy
+#
+# Every Julia process runs inside bubblewrap: it sees /usr read-only, its own
+# project copy, a separate Julia depot and the GPU device nodes -- not your
+# home directory, not ~/.ssh, and (except for `instantiate`) no network.
+set -euo pipefail
+umask 077
+
+CONFIG=${CLAUDE_GPU_CONFIG:-$HOME/.config/claude-gpu/config}
+# shellcheck source=/dev/null
+[ -f "$CONFIG" ] && . "$CONFIG"
+
+BASE=${BASE:-/tmp/$USER-claude-gpu}                  # local disk, private (0700)
+BWRAP=${BWRAP:-$HOME/.local/lib/claude-gpu/bwrap/usr/bin/bwrap}
+JULIA=${JULIA:-$(command -v julia || true)}
+PKG_SERVER=${PKG_SERVER:-https://pkg.julialang.org}
+TIMEOUT_RUN=${TIMEOUT_RUN:-3600}                     # test/run, seconds
+TIMEOUT_SETUP=${TIMEOUT_SETUP:-3600}                 # instantiate, seconds
+MEMORY_MAX=${MEMORY_MAX:-64G}                        # needs USE_SYSTEMD=1
+USE_SYSTEMD=${USE_SYSTEMD:-0}
+MAX_SYNC_BYTES=${MAX_SYNC_BYTES:-2147483648}         # 2 GiB compressed
+JULIA_THREADS=${JULIA_THREADS:-8}
+
+die() { echo "gateway: $*" >&2; exit 2; }
+log() { printf '%s %s\n' "$(date -Is)" "$*" >> "$BASE/gateway.log"; }
+
+mkdir -p "$BASE/projects" "$BASE/depot"
+chmod 700 "$BASE"
+
+# ---------------------------------------------------------------------------
+# Parse the request (whitespace-separated tokens, strict character set)
+# ---------------------------------------------------------------------------
+read -r -a ARGV <<< "${SSH_ORIGINAL_COMMAND:-}"
+for tok in "${ARGV[@]}"; do
+    [[ "$tok" =~ ^[A-Za-z0-9._/=:,+@-]+$ ]] || die "rejected token: '$tok'"
+done
+log "request: ${SSH_ORIGINAL_COMMAND:-<none>}"
+
+GPU_SEL=auto
+if [[ "${ARGV[0]:-}" =~ ^gpu=([0-9]+|auto)$ ]]; then
+    GPU_SEL=${BASH_REMATCH[1]}
+    ARGV=("${ARGV[@]:1}")
+fi
+CMD=${ARGV[0]:-help}
+ARGV=("${ARGV[@]:1}")
+
+project_dir() {
+    local name=${1:-}
+    [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die "invalid project name '$name'"
+    echo "$BASE/projects/$name"
+}
+
+pick_gpu() {
+    # Least memory used, then least utilisation. Prints the GPU UUID.
+    if [ "$GPU_SEL" = auto ]; then
+        nvidia-smi --query-gpu=memory.used,utilization.gpu,uuid --format=csv,noheader,nounits \
+            | sort -t, -k1,1n -k2,2n | head -n1 | awk -F', *' '{print $3}'
+    else
+        nvidia-smi --query-gpu=index,uuid --format=csv,noheader \
+            | awk -F', *' -v i="$GPU_SEL" '$1 == i {print $2}'
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Sandbox
+# ---------------------------------------------------------------------------
+# Read-only system: /usr plus the top-level /bin, /lib, /lib64 ... entries
+# (symlinks into /usr on merged-usr systems like Debian 13).
+base_fs() {
+    FS=(--ro-bind /usr /usr --proc /proc --dev /dev --tmpfs /tmp)
+    local p
+    for p in /bin /sbin /lib /lib32 /lib64 /libx32; do
+        if [ -L "$p" ]; then FS+=(--symlink "$(readlink "$p")" "$p")
+        elif [ -d "$p" ]; then FS+=(--ro-bind "$p" "$p"); fi
+    done
+}
+
+# sandbox <net|nonet> <host dir mounted at /work> <timeout> -- cmd...
+sandbox() {
+    local net=$1 work=$2 tmo=$3; shift 4
+    [ -x "$BWRAP" ] || die "bubblewrap not found at $BWRAP (run install.sh)"
+    local gpu_uuid
+    gpu_uuid=$(pick_gpu)
+    [ -n "$gpu_uuid" ] || die "no matching GPU ($GPU_SEL)"
+    echo "gateway: using GPU $gpu_uuid" >&2
+
+    base_fs
+    local a=(
+        --unshare-all --die-with-parent --new-session
+        "${FS[@]}"
+        --tmpfs /run --tmpfs /home
+        --dir /home/sandbox
+        --ro-bind-try /sys /sys
+        --bind "$work" /work
+        --bind "$BASE/depot" /depot
+        --chdir /work
+        --clearenv
+        --setenv HOME /home/sandbox
+        --setenv USER sandbox
+        --setenv LANG C.UTF-8
+        --setenv JULIA_DEPOT_PATH /depot
+        --setenv JULIA_PKG_SERVER "$PKG_SERVER"
+        --setenv JULIA_NUM_THREADS "$JULIA_THREADS"
+        --setenv CUDA_VISIBLE_DEVICES "$gpu_uuid"
+        --setenv JULIA_CUDA_USE_COMPAT false
+    )
+    local p
+    # Minimal /etc
+    for p in ld.so.cache ld.so.conf ld.so.conf.d passwd group nsswitch.conf \
+             localtime ssl ca-certificates ca-certificates.conf alternatives; do
+        a+=(--ro-bind-try "/etc/$p" "/etc/$p")
+    done
+    # GPU device nodes
+    for p in /dev/nvidia*; do
+        [ -e "$p" ] && a+=(--dev-bind "$p" "$p")
+    done
+    # Julia installation, if it lives outside /usr
+    local jhome
+    jhome=$(dirname "$(dirname "$(readlink -f "$JULIA")")")
+    [ -x "$JULIA" ] || die "julia not found (set JULIA in $CONFIG)"
+    case "$jhome" in
+        /usr|/usr/*) ;;                                   # already visible
+        /|"$HOME"|"$HOME"/.julia) die "refusing to expose $jhome; set JULIA to a standalone install" ;;
+        *) a+=(--ro-bind "$jhome" "$jhome") ;;
+    esac
+    a+=(--setenv PATH "$(dirname "$(readlink -f "$JULIA")"):/usr/local/bin:/usr/bin:/bin")
+
+    if [ "$net" = net ]; then
+        a+=(--share-net
+            --ro-bind-try /etc/resolv.conf /etc/resolv.conf
+            --ro-bind-try /etc/hosts /etc/hosts)
+    else
+        a+=(--setenv JULIA_PKG_OFFLINE true)
+    fi
+
+    local wrap=(timeout --kill-after=30 "$tmo")
+    if [ "$USE_SYSTEMD" = 1 ]; then
+        wrap=(systemd-run --user --scope --quiet -p "MemoryMax=$MEMORY_MAX" -p TasksMax=4096 "${wrap[@]}")
+    fi
+
+    # Record the PID so `kill` can stop it
+    "${wrap[@]}" nice -n 10 "$BWRAP" "${a[@]}" -- "$@" &
+    local pid=$!
+    echo "$pid" > "$BASE/current.pid"
+    local rc=0
+    wait "$pid" || rc=$?
+    rm -f "$BASE/current.pid"
+    [ "$rc" = 124 ] && echo "gateway: timed out after ${tmo}s" >&2
+    return "$rc"
+}
+
+# One heavy job at a time (shared server)
+take_lock() {
+    exec 9>"$BASE/lock"
+    if ! flock -n 9; then
+        echo "gateway: another run is in progress, waiting (max 10 min) ..." >&2
+        flock -w 600 9 || die "still busy, giving up"
+    fi
+}
+
+INSTANTIATE_JL='
+using Pkg
+Pkg.instantiate()
+# Pre-fetch test dependencies so `test` works offline
+if isfile("test/Project.toml")
+    Pkg.activate("test"); Pkg.instantiate(); Pkg.activate(".")
+else
+    p = Pkg.TOML.parsefile("Project.toml")
+    names = get(get(p, "targets", Dict()), "test", String[])
+    if !isempty(names)
+        Pkg.activate(; temp=true)
+        Pkg.develop(path=pwd())
+        Pkg.add(names)
+        Pkg.activate(".")
+    end
+end
+Pkg.precompile()
+'
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+case "$CMD" in
+    sync)
+        dir=$(project_dir "${ARGV[0]:-}")
+        new="$dir.incoming"
+        rm -rf "$new"; mkdir -p "$new"
+        # Unpack inside a sandbox that can only write the target directory
+        base_fs
+        head -c "$MAX_SYNC_BYTES" | "$BWRAP" --unshare-all --die-with-parent \
+            "${FS[@]}" --bind "$new" /dst --chdir /dst \
+            -- tar -xz --no-same-owner --no-same-permissions -f -
+        rm -rf "$dir"; mv "$new" "$dir"
+        echo "gateway: synced $(find "$dir" -type f | wc -l) files to ${ARGV[0]}"
+        ;;
+    instantiate)
+        dir=$(project_dir "${ARGV[0]:-}"); [ -d "$dir" ] || die "sync first"
+        take_lock
+        sandbox net "$dir" "$TIMEOUT_SETUP" -- "$(readlink -f "$JULIA")" --project=/work -e "$INSTANTIATE_JL"
+        ;;
+    test)
+        dir=$(project_dir "${ARGV[0]:-}"); [ -d "$dir" ] || die "sync first"
+        take_lock
+        jl_args=""
+        for t in "${ARGV[@]:1}"; do jl_args+="\"$t\","; done   # tokens are pre-validated
+        sandbox nonet "$dir" "$TIMEOUT_RUN" -- "$(readlink -f "$JULIA")" --project=/work \
+            -e "using Pkg; Pkg.test(; test_args=String[${jl_args%,}])"
+        ;;
+    run)
+        dir=$(project_dir "${ARGV[0]:-}"); [ -d "$dir" ] || die "sync first"
+        script=${ARGV[1]:-}
+        [[ "$script" =~ ^[A-Za-z0-9_][A-Za-z0-9._/-]*\.jl$ && "$script" != *..* ]] \
+            || die "run needs a .jl file inside the project, got '$script'"
+        [ -f "$dir/$script" ] || die "no such file in project: $script"
+        take_lock
+        sandbox nonet "$dir" "$TIMEOUT_RUN" -- "$(readlink -f "$JULIA")" --project=/work "/work/$script" "${ARGV[@]:2}"
+        ;;
+    status)
+        nvidia-smi
+        if [ -f "$BASE/current.pid" ]; then echo "Run in progress (pid $(cat "$BASE/current.pid"))"
+        else echo "No run in progress"; fi
+        ;;
+    kill)
+        if [ -f "$BASE/current.pid" ]; then
+            kill -TERM "$(cat "$BASE/current.pid")" 2>/dev/null || true
+            echo "gateway: sent TERM to current run"
+        else echo "gateway: nothing running"; fi
+        ;;
+    clean)
+        dir=$(project_dir "${ARGV[0]:-}")
+        rm -rf "$dir"; echo "gateway: removed ${ARGV[0]}"
+        ;;
+    help)
+        sed -n '9,15p' "$0" | sed 's/^# \{0,3\}//'
+        ;;
+    *)
+        echo "gateway: unknown command '$CMD'. Allowed:" >&2
+        sed -n '9,15p' "$0" | sed 's/^# \{0,3\}//' >&2
+        exit 2
+        ;;
+esac

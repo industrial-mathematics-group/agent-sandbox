@@ -1,0 +1,84 @@
+# agent-sandbox base: Debian trixie + shell tooling + entrypoint. No language
+# runtimes and no Claude Code yet: those come from the language images and the
+# final images/claude step (see build.sh for the chains).
+#
+# No sudo and no firewall tools on purpose: the network is owned and filtered by
+# the gateway sidecar (gateway/), whose network namespace this container joins.
+ARG DEBIAN_IMAGE=docker.io/library/debian:trixie-slim
+FROM ${DEBIAN_IMAGE}
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# build-essential + pkg-config: native modules (node-gyp), Python sdists, Julia
+# packages that compile at build time. netcat-openbsd: SSH through the gateway proxy.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl wget gnupg less procps man-db \
+      git git-delta gh openssh-client netcat-openbsd \
+      zsh fzf nano vim-tiny jq unzip xz-utils zstd \
+      iproute2 bind9-dnsutils tzdata locales \
+      build-essential pkg-config \
+    && sed -i 's/^# *\(en_US.UTF-8\)/\1/' /etc/locale.gen && locale-gen \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Unprivileged user. uid/gid 1000 so files in /workspace match the usual first
+# host user (Docker) or the host sandbox user via keep-id (Podman).
+RUN groupadd -g 1000 agent \
+ && useradd -m -u 1000 -g 1000 -s /bin/zsh agent \
+ && mkdir -p /workspace /commandhistory /home/agent/.claude /home/agent/.local/bin \
+ && touch /commandhistory/.zsh_history \
+ && chown -R agent:agent /workspace /commandhistory /home/agent
+
+# The gateway runs a filtering HTTP(S) proxy on 127.0.0.1:3128 inside the shared
+# network namespace. Direct connections from this container are blocked, so every
+# tool has to go through it. NODE_USE_ENV_PROXY makes Node's built-in fetch honour it.
+ENV LANG=en_US.UTF-8 \
+    TZ=Etc/UTC \
+    HTTP_PROXY=http://127.0.0.1:3128 \
+    HTTPS_PROXY=http://127.0.0.1:3128 \
+    http_proxy=http://127.0.0.1:3128 \
+    https_proxy=http://127.0.0.1:3128 \
+    NO_PROXY=localhost,127.0.0.1,::1 \
+    no_proxy=localhost,127.0.0.1,::1 \
+    NODE_USE_ENV_PROXY=1 \
+    DEVCONTAINER=true \
+    AGENT_SANDBOX=1 \
+    SHELL=/bin/zsh \
+    EDITOR=nano \
+    VISUAL=nano \
+    PATH=/home/agent/.local/bin:$PATH
+
+# SSH (git over ssh, the gpu/slurm add-ons) also goes through the proxy.
+RUN printf '%s\n' \
+      '# agent-sandbox: all traffic leaves through the gateway proxy' \
+      'Host *' \
+      '    ProxyCommand nc -X connect -x 127.0.0.1:3128 %h %p' \
+      > /etc/ssh/ssh_config.d/50-agent-sandbox-proxy.conf
+
+WORKDIR /workspace
+
+USER agent
+ARG ZSH_IN_DOCKER_VERSION=1.2.0
+RUN sh -c "$(wget -qO- https://github.com/deluan/zsh-in-docker/releases/download/v${ZSH_IN_DOCKER_VERSION}/zsh-in-docker.sh)" -- \
+      -p git -p fzf \
+      -a "source /usr/share/doc/fzf/examples/key-bindings.zsh" \
+      -a "source /usr/share/doc/fzf/examples/completion.zsh" \
+      -a "export HISTFILE=/commandhistory/.zsh_history" \
+      -x \
+ && git config --global core.pager delta \
+ && git config --global interactive.diffFilter 'delta --color-only'
+USER root
+
+# Entrypoint + hooks. Layers add their own hooks to entrypoint.d (e.g. Xvfb) and
+# their CLAUDE.md fragments to claude-md/; the entrypoint assembles them.
+COPY --chmod=0755 entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY --chmod=0755 assemble-claude-md /usr/local/bin/assemble-claude-md
+RUN install -d -m 0755 /usr/local/lib/agent-sandbox/entrypoint.d \
+                       /usr/share/agent-sandbox/claude-md /opt/agent-sandbox/addons \
+                       /etc/claude-code
+COPY --chmod=0644 claude-md/ /usr/share/agent-sandbox/claude-md/
+
+LABEL org.opencontainers.image.title="agent-sandbox base" \
+      org.opencontainers.image.description="Sandboxed container for coding agents such as Claude Code: base layer"
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["zsh"]

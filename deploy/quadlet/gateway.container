@@ -1,0 +1,32 @@
+# agent-sandbox instance "@NAME@": gateway (network namespace, firewall, proxy).
+[Unit]
+Description=agent-sandbox @NAME@ - gateway (firewall + proxy)
+
+[Container]
+Image=@GATEWAY_IMAGE@
+ContainerName=@NAME@-gateway
+Network=@NAME@.network
+AutoUpdate=registry
+
+# GATEWAY_MODE, GATEWAY_PROFILES, GATEWAY_EXTRA_DOMAINS, GATEWAY_INBOUND_PORTS (+ TS_* for Tailscale)
+EnvironmentFile=@CONFIG_DIR@/gateway.env
+# Your own allowed hosts, one per line (read-only to everything)
+Volume=@CONFIG_DIR@/extra.list:/etc/agent-sandbox/extra.list:ro,Z
+
+DropCapability=all
+# NET_ADMIN/NET_RAW: firewall. SETUID/SETGID: the proxy drops to its own user.
+AddCapability=NET_ADMIN NET_RAW SETUID SETGID
+NoNewPrivileges=true
+Sysctl=net.ipv6.conf.all.disable_ipv6=1
+Sysctl=net.ipv6.conf.default.disable_ipv6=1
+
+# Published ports (plain network mode; dev servers in the agent listen here)
+@PUBLISH_PORTS@
+
+[Service]
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=600
+
+[Install]
+WantedBy=default.target

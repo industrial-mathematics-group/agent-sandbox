@@ -1,0 +1,26 @@
+# agent-sandbox gateway: owns the agent's network namespace. Installs the egress
+# firewall and runs a filtering HTTP(S) proxy (tinyproxy) that only lets through
+# the hosts on the selected allowlists.
+#
+# Plain variant:      BASE_IMAGE=docker.io/library/alpine:3.22 (default)
+# Tailscale variant:  BASE_IMAGE=docker.io/tailscale/tailscale:stable
+#                     (egress only through a Tailscale exit node; GATEWAY_VPN=tailscale)
+ARG BASE_IMAGE=docker.io/library/alpine:3.22
+FROM ${BASE_IMAGE}
+
+# iproute2: tailscaled marks its own sockets (fwmark 0x80000) only when policy
+# routing (`ip rule`) is available; the firewall recognises its traffic by that mark.
+RUN apk add --no-cache bash ipset bind-tools jq curl iproute2 iptables ip6tables tinyproxy \
+ && addgroup -S -g 3128 agentproxy \
+ && adduser -S -D -H -u 3128 -G agentproxy -s /sbin/nologin agentproxy \
+ && install -d -m 0755 /etc/agent-sandbox /run/agent-gateway
+
+COPY --chmod=0644 lists/ /etc/agent-sandbox/lists/
+COPY --chmod=0755 entrypoint.sh render-config.sh init-firewall.sh /usr/local/bin/
+
+ARG VARIANT=plain
+ENV GATEWAY_VARIANT=${VARIANT}
+LABEL org.opencontainers.image.title="agent-sandbox gateway (${VARIANT})" \
+      org.opencontainers.image.description="Egress firewall + filtering proxy sidecar for agent-sandbox"
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

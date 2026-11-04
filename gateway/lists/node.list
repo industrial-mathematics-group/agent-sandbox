@@ -1,0 +1,19 @@
+# Node.js / web development
+registry.npmjs.org
+registry.yarnpkg.com
+repo.yarnpkg.com
+nodejs.org
+jsr.io
+npm.jsr.io
+
+# Playwright browser downloads
+cdn.playwright.dev
+playwright.download.prss.microsoft.com
+playwright.azureedge.net
+
+# Common binary downloads during npm install
+binaries.prisma.sh
+
+# Google Fonts (next/font and friends fetch them at build time)
+fonts.googleapis.com
+fonts.gstatic.com

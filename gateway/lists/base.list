@@ -1,0 +1,14 @@
+# Always loaded. One host per line; "*.example.com" matches example.com and all
+# its subdomains. Lines starting with # are comments.
+
+# Claude API + login (Pro/Max OAuth)
+api.anthropic.com
+claude.ai
+console.anthropic.com
+platform.claude.com
+
+# GitHub: git over https/ssh, API, release downloads, raw files
+github.com
+api.github.com
+codeload.github.com
+*.githubusercontent.com

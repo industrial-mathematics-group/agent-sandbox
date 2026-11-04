@@ -1,0 +1,131 @@
+# Builds and publishes all images to GHCR:
+#   ghcr.io/<owner>/agent-sandbox:<flavor>          (+ <flavor>-YYYYMMDD, <flavor>-cc<version>)
+#   ghcr.io/<owner>/agent-sandbox-gateway:latest    (+ :tailscale, and -YYYYMMDD variants)
+# On push to main, weekly (new Claude Code / Julia releases) and on demand.
+# Pull requests build and smoke-test without pushing.
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write   # keyless cosign signing
+
+env:
+  PUSH: ${{ github.event_name != 'pull_request' }}
+
+jobs:
+  versions:
+    runs-on: ubuntu-24.04
+    outputs:
+      registry: ${{ steps.v.outputs.registry }}
+      date: ${{ steps.v.outputs.date }}
+      claude: ${{ steps.v.outputs.claude }}
+      julia: ${{ steps.v.outputs.julia }}
+    steps:
+      - id: v
+        run: |
+          echo "registry=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+          echo "claude=$(npm view @anthropic-ai/claude-code version)" >> "$GITHUB_OUTPUT"
+          echo "julia=$(curl -fsSL https://julialang-s3.julialang.org/bin/versions.json \
+            | jq -r 'to_entries | map(select(.value.stable)) | sort_by(.key | split(".") | map(tonumber)) | last | .key')" >> "$GITHUB_OUTPUT"
+
+  gateway:
+    needs: versions
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        include:
+          - { tag: latest,    base: docker.io/library/alpine:3.22,      variant: plain }
+          - { tag: tailscale, base: docker.io/tailscale/tailscale:stable, variant: tailscale }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        if: env.PUSH == 'true'
+        with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: gateway
+          file: gateway/Containerfile
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            BASE_IMAGE=${{ matrix.base }}
+            VARIANT=${{ matrix.variant }}
+          push: ${{ env.PUSH == 'true' }}
+          tags: |
+            ${{ needs.versions.outputs.registry }}/agent-sandbox-gateway:${{ matrix.tag }}
+            ${{ needs.versions.outputs.registry }}/agent-sandbox-gateway:${{ matrix.tag }}-${{ needs.versions.outputs.date }}
+      - uses: sigstore/cosign-installer@v3
+        if: env.PUSH == 'true'
+      - if: env.PUSH == 'true'
+        run: cosign sign --yes "${{ needs.versions.outputs.registry }}/agent-sandbox-gateway@${{ steps.build.outputs.digest }}"
+
+  images:
+    needs: [versions, gateway]
+    strategy:
+      fail-fast: false
+      matrix:
+        flavor: [minimal, node, node-chromium, python, python-gui, julia, julia-gui, full, full-rocm]
+        arch: [amd64, arm64]
+        exclude:
+          - { flavor: full-rocm, arch: arm64 }   # ROCm is amd64 only
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    env:
+      REGISTRY: ${{ needs.versions.outputs.registry }}
+      CLAUDE_CODE_VERSION: ${{ needs.versions.outputs.claude }}
+      JULIA_VERSION: ${{ needs.versions.outputs.julia }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space (ROCm and full images are large)
+        if: startsWith(matrix.flavor, 'full')
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache
+      - uses: docker/login-action@v3
+        with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
+      - name: Build
+        run: ./build.sh --engine docker --registry "$REGISTRY" --tag-suffix "-${{ matrix.arch }}" "${{ matrix.flavor }}"
+      - name: Smoke test
+        # The gateway from this run is only pushed on main; on PRs, build it locally.
+        run: |
+          if [ "$PUSH" != true ]; then ./build.sh --engine docker --registry "$REGISTRY" gateway; fi
+          TAG_SUFFIX="-${{ matrix.arch }}" tests/smoke.sh "${{ matrix.flavor }}" "$REGISTRY"
+      - name: Push
+        if: env.PUSH == 'true'
+        run: docker push "$REGISTRY/agent-sandbox:${{ matrix.flavor }}-${{ matrix.arch }}"
+
+  manifests:
+    if: github.event_name != 'pull_request'
+    needs: [versions, images]
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        flavor: [minimal, node, node-chromium, python, python-gui, julia, julia-gui, full, full-rocm]
+    env:
+      IMG: ${{ needs.versions.outputs.registry }}/agent-sandbox
+    steps:
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
+      - uses: sigstore/cosign-installer@v3
+      - name: Multi-arch tags + signature
+        run: |
+          f=${{ matrix.flavor }}
+          srcs=("$IMG:$f-amd64")
+          [ "$f" = full-rocm ] || srcs+=("$IMG:$f-arm64")
+          docker buildx imagetools create \
+            -t "$IMG:$f" \
+            -t "$IMG:$f-${{ needs.versions.outputs.date }}" \
+            -t "$IMG:$f-cc${{ needs.versions.outputs.claude }}" \
+            "${srcs[@]}"
+          digest=$(docker buildx imagetools inspect "$IMG:$f" --format '{{json .Manifest}}' | jq -r .digest)
+          cosign sign --yes "$IMG@$digest"

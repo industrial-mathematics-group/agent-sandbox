@@ -1,0 +1,30 @@
+# Node.js (LTS) + corepack (pnpm, yarn) for web development.
+# Node is copied from the official image instead of apt, so it is the current LTS
+# and matches what most projects test against.
+ARG NODE_VERSION=24
+ARG BASE=localhost/agent-sandbox-stage:base
+FROM docker.io/library/node:${NODE_VERSION}-trixie-slim AS node
+
+FROM ${BASE}
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+USER root
+
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+ && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
+ && if [ -d /usr/local/lib/node_modules/corepack ]; then \
+      ln -s ../lib/node_modules/corepack/dist/corepack.js /usr/local/bin/corepack \
+      && corepack enable --install-directory /usr/local/bin; \
+    fi \
+ && node --version && npm --version
+
+# Global npm installs go to the (non-persistent) home: projects should declare
+# their tools as devDependencies instead.
+ENV NPM_CONFIG_PREFIX=/home/agent/.npm-global \
+    NPM_CONFIG_UPDATE_NOTIFIER=false \
+    COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
+    PATH=/home/agent/.npm-global/bin:$PATH
+RUN install -d -o agent -g agent /home/agent/.npm-global /home/agent/.cache /home/agent/.npm
+
+COPY --chmod=0644 claude-md/ /usr/share/agent-sandbox/claude-md/

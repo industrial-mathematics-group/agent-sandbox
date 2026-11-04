@@ -1,0 +1,24 @@
+#!/bin/bash
+# Builds the managed /etc/claude-code/CLAUDE.md from the fragments each image
+# layer ships (/usr/share/agent-sandbox/claude-md/NN-name.md, sorted by name)
+# and the fragments of mounted add-ons (/opt/agent-sandbox/addons/*/claude.md).
+#
+# The managed-policy location is loaded in every Claude Code session, can't be
+# excluded, is root-owned (the agent can't edit it) and lives outside the
+# ~/.claude volume, so it always matches the image and the active add-ons.
+set -euo pipefail
+
+out=${1:-/etc/claude-code/CLAUDE.md}
+tmp=$(mktemp)
+{
+    first=1
+    for f in /usr/share/agent-sandbox/claude-md/*.md /opt/agent-sandbox/addons/*/claude.md; do
+        [ -r "$f" ] || continue
+        [ "$first" = 1 ] || printf '\n'
+        cat "$f"
+        first=0
+    done
+} > "$tmp"
+install -d -m 0755 "$(dirname "$out")"
+install -m 0644 "$tmp" "$out"
+rm -f "$tmp"

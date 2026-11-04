@@ -1,0 +1,32 @@
+# General add-on layer: AMD ROCm runtime, for AMDGPU.jl or PyTorch-ROCm on AMD
+# GPUs (e.g. RX 9070 XT = RDNA4 / gfx1201 needs ROCm >= 6.4.1).
+# Needs the gpu-local add-on at runtime (passes /dev/kfd + /dev/dri in).
+#
+# Repo setup follows AMD's Debian instructions. AMD publishes Ubuntu suites for
+# Debian: check the page for your ROCm version and set ROCM_SUITE accordingly
+# (noble for Debian 13 trixie, jammy for Debian 12 bookworm):
+#   https://rocm.docs.amd.com/projects/install-on-linux/en/latest/install/install-methods/package-manager/package-manager-debian.html
+ARG BASE=localhost/agent-sandbox-stage:base
+FROM ${BASE}
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+USER root
+
+ARG ROCM_VERSION=7.2.4
+ARG ROCM_SUITE=noble
+# Runtime + device libs (needed by AMDGPU.jl's compiler) + the common math libs
+ARG ROCM_PACKAGES="rocm-hip-runtime rocm-device-libs rocminfo rocblas rocfft rocrand rocsparse rocsolver"
+
+RUN install -d -m 0755 /etc/apt/keyrings \
+ && curl -fsSL https://repo.radeon.com/rocm/rocm.gpg.key | gpg --dearmor > /etc/apt/keyrings/rocm.gpg \
+ && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/${ROCM_VERSION} ${ROCM_SUITE} main" \
+      > /etc/apt/sources.list.d/rocm.list \
+ && printf 'Package: *\nPin: release o=repo.radeon.com\nPin-Priority: 600\n' > /etc/apt/preferences.d/rocm-pin-600 \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends ${ROCM_PACKAGES} \
+ && apt-get clean && rm -rf /var/lib/apt/lists/* \
+ && ls -d /opt/rocm*/lib/libamdhip64.so* /opt/rocm*/lib/libhsa-runtime64.so* >/dev/null
+
+ENV ROCM_PATH=/opt/rocm \
+    PATH=$PATH:/opt/rocm/bin
+
+COPY --chmod=0644 claude-md/ /usr/share/agent-sandbox/claude-md/

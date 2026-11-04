@@ -1,0 +1,21 @@
+# Egress only through a Tailscale exit node. TS_AUTHKEY, TS_EXIT_NODE, TS_HOSTNAME
+# go into gateway.env. Inbound ports (PORTS) are then opened on the tailnet.
+#   docker compose -f compose.yaml -f compose.tailscale.yaml up -d
+services:
+  gateway:
+    image: ${REGISTRY:-ghcr.io/OWNER}/agent-sandbox-gateway:tailscale
+    environment:
+      GATEWAY_VPN: tailscale
+    devices: [/dev/net/tun]
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+    # SELinux blocks /dev/net/tun for confined containers; gateway only
+    security_opt: ["label=disable"]
+    sysctls:
+      net.ipv4.conf.all.src_valid_mark: 1
+      net.ipv4.conf.all.rp_filter: 2
+      net.ipv4.conf.default.rp_filter: 2
+    ports: !reset []
+
+volumes:
+  tailscale-state:

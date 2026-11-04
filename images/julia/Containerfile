@@ -1,0 +1,34 @@
+# Julia from the official tarball (checksum-verified).
+ARG BASE=localhost/agent-sandbox-stage:base
+FROM ${BASE}
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+USER root
+
+# "latest" resolves to the newest stable release from the official versions.json.
+ARG JULIA_VERSION=latest
+RUN case "$(dpkg --print-architecture)" in \
+      amd64) JARCH=x86_64 ;; \
+      arm64) JARCH=aarch64 ;; \
+      *) echo "Unsupported architecture" >&2; exit 1 ;; \
+    esac \
+ && curl -fsSL https://julialang-s3.julialang.org/bin/versions.json -o /tmp/versions.json \
+ && if [ "$JULIA_VERSION" = "latest" ]; then \
+      JULIA_VERSION=$(jq -r 'to_entries | map(select(.value.stable)) | sort_by(.key | split(".") | map(tonumber)) | last | .key' /tmp/versions.json); \
+    fi \
+ && SEL=".[\$v].files[] | select(.triplet == (\$a + \"-linux-gnu\") and .kind == \"archive\" and .extension == \"tar.gz\")" \
+ && URL=$(jq -r --arg v "$JULIA_VERSION" --arg a "$JARCH" "$SEL | .url" /tmp/versions.json | head -n1) \
+ && SHA=$(jq -r --arg v "$JULIA_VERSION" --arg a "$JARCH" "$SEL | .sha256" /tmp/versions.json | head -n1) \
+ && test -n "$URL" && test "$URL" != "null" \
+ && echo "Installing Julia $JULIA_VERSION from $URL" \
+ && curl -fsSL "$URL" -o /tmp/julia.tar.gz \
+ && echo "$SHA  /tmp/julia.tar.gz" | sha256sum -c - \
+ && mkdir -p /opt/julia \
+ && tar -xzf /tmp/julia.tar.gz -C /opt/julia --strip-components=1 \
+ && ln -s /opt/julia/bin/julia /usr/local/bin/julia \
+ && rm -f /tmp/julia.tar.gz /tmp/versions.json \
+ && julia --version
+
+# ~/.julia is meant to be a named volume so precompilation survives updates.
+RUN install -d -o agent -g agent /home/agent/.julia
+
+COPY --chmod=0644 claude-md/ /usr/share/agent-sandbox/claude-md/

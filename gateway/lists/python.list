@@ -1,0 +1,11 @@
+# Python: PyPI (uv/pip). uv-managed interpreters come from GitHub releases
+# (covered by base.list).
+pypi.org
+files.pythonhosted.org
+
+# PyTorch wheels
+download.pytorch.org
+
+# Not enabled by default, copy into your extra.list if needed:
+#   conda.anaconda.org repo.anaconda.com      conda / CondaPkg.jl
+#   huggingface.co *.hf.co                    Hugging Face models and datasets

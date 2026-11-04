@@ -1,0 +1,79 @@
+# agent-sandbox with Docker Compose (or podman compose).
+#
+#   cp .env.example .env && cp gateway.env.example gateway.env && cp sandbox.env.example sandbox.env
+#   touch extra.list
+#   docker compose up -d
+#   docker compose exec -u agent agent claude
+#
+# One Compose project = one sandbox. For several projects, use one copy of .env per
+# project with its own SANDBOX_NAME and WORKSPACE (docker compose --env-file web.env ...).
+#
+# Overlays (add with -f, paths relative to this folder):
+#   compose.tailscale.yaml                          egress only via a Tailscale exit node
+#   compose.podman.yaml                             rootless Podman (keep-id user mapping)
+#   ../../addons/gpu-local/compose.gpu-amd.yaml     local AMD GPU   (FLAVOR=full-rocm)
+#   ../../addons/gpu-local/compose.gpu-nvidia.yaml  local NVIDIA GPU (CDI)
+#   ../../addons/gpu-remote/compose.yaml            remote GPU server gateway
+#   ../../addons/slurm/compose.yaml                 Slurm cluster gateway
+name: ${SANDBOX_NAME:-agent}
+
+services:
+  gateway:
+    image: ${REGISTRY:-ghcr.io/OWNER}/agent-sandbox-gateway:${GATEWAY_TAG:-latest}
+    env_file: [gateway.env]
+    environment:
+      GATEWAY_INBOUND_PORTS: ${PORTS:-}
+    volumes:
+      - ./extra.list:/etc/agent-sandbox/extra.list:ro
+    cap_drop: [ALL]
+    # NET_ADMIN/NET_RAW: firewall. SETUID/SETGID: the proxy drops to its own user.
+    cap_add: [NET_ADMIN, NET_RAW, SETUID, SETGID]
+    security_opt: ["no-new-privileges:true"]
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: 1
+      net.ipv6.conf.default.disable_ipv6: 1
+    # Dev servers in the agent listen here (the agent shares this network namespace).
+    # Only on the host's loopback; list the same ports in PORTS.
+    ports:
+      - "127.0.0.1:${PORT_1:-3000}:${PORT_1:-3000}"
+    restart: unless-stopped
+
+  agent:
+    image: ${REGISTRY:-ghcr.io/OWNER}/agent-sandbox:${FLAVOR:-full}
+    network_mode: service:gateway
+    depends_on: [gateway]
+    env_file: [sandbox.env]
+    environment:
+      NODE_OPTIONS: --max-old-space-size=4096
+      POWERLEVEL9K_DISABLE_GITSTATUS: "true"
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: safe.directory
+      GIT_CONFIG_VALUE_0: "*"
+    volumes:
+      - ${WORKSPACE:-./workspace}:/workspace
+      - claude:/home/agent/.claude
+      - history:/commandhistory
+      - cache:/home/agent/.cache
+      - npm:/home/agent/.npm
+      - uv-python:/home/agent/.local/share/uv
+      - julia-depot:/home/agent/.julia
+    cap_drop: [ALL]
+    # Only for the entrypoint's switch to the unprivileged `agent` user
+    cap_add: [SETUID, SETGID]
+    security_opt: ["no-new-privileges:true"]
+    init: true
+    pids_limit: 4096
+    shm_size: 1gb
+    mem_limit: ${MEMORY:-16g}
+    cpus: ${CPUS:-8}
+    command: ["sleep", "infinity"]
+    restart: unless-stopped
+
+# Shared by every sandbox on this machine (fixed names, no project prefix)
+volumes:
+  claude:      { name: agent-sandbox-claude }
+  history:     { name: agent-sandbox-history }
+  cache:       { name: agent-sandbox-cache }
+  npm:         { name: agent-sandbox-npm }
+  uv-python:   { name: agent-sandbox-uv-python }
+  julia-depot: { name: agent-sandbox-julia-depot }

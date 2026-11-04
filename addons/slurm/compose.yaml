@@ -1,0 +1,10 @@
+# slurm add-on:
+#   docker compose -f compose.yaml -f ../../addons/slurm/compose.yaml up -d
+# Paths are relative to deploy/compose (the first compose file's folder).
+services:
+  agent:
+    volumes:
+      - ../../addons/slurm:/opt/agent-sandbox/addons/slurm:ro
+      - ${SLURM_SSH_DIR:-./slurm-ssh}:/run/slurm-ssh:ro
+    env_file:
+      - ${SLURM_ENV:-./slurm.env}

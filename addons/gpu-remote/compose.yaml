@@ -1,0 +1,10 @@
+# gpu-remote add-on:
+#   docker compose -f compose.yaml -f ../../addons/gpu-remote/compose.yaml up -d
+# Paths are relative to deploy/compose (the first compose file's folder).
+services:
+  agent:
+    volumes:
+      - ../../addons/gpu-remote:/opt/agent-sandbox/addons/gpu-remote:ro
+      - ${GPU_SSH_DIR:-./gpu-ssh}:/run/gpu-ssh:ro
+    env_file:
+      - ${GPU_REMOTE_ENV:-./gpu-remote.env}

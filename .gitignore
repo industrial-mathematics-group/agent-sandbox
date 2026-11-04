@@ -1,0 +1,7 @@
+# Local Compose configuration (copied from the *.example files)
+deploy/compose/.env
+deploy/compose/*.env
+!deploy/compose/*.env.example
+deploy/compose/extra.list
+deploy/compose/workspace/
+deploy/compose/*-ssh/
