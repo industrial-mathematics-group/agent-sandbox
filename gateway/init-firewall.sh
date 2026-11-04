@@ -105,24 +105,30 @@ iptables -P FORWARD DROP
 # ---------------------------------------------------------------------------
 # OUTPUT
 # ---------------------------------------------------------------------------
-iptables -A OUTPUT -o lo -j ACCEPT
 iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 [ "$VPN" = tailscale ] && iptables -A OUTPUT -m mark --mark "$TS_BYPASS_MARK" -j ACCEPT
 
-# DNS only to the configured resolver(s)
+# DNS only to the configured resolver(s), and only for root and the proxy. These
+# rules come before the loopback rule: Docker's embedded resolver (127.0.0.11)
+# is on lo, and its nat rules redirect port 53 to a random port, so match the
+# connection's original destination instead of the rewritten one.
 resolvers=$(awk '/^nameserver/ && $2 ~ /^[0-9.]+$/ {print $2}' /etc/resolv.conf)
 [ -n "$resolvers" ] || { echo "ERROR: no IPv4 nameserver in /etc/resolv.conf" >&2; exit 1; }
 while read -r ns; do
     for proto in udp tcp; do
+        dns=(-p "$proto" -m conntrack --ctorigdst "$ns" --ctorigdstport 53)
         if [ "$agent_dns" = 1 ]; then
-            iptables -A OUTPUT -d "$ns" -p "$proto" --dport 53 -j ACCEPT
+            iptables -A OUTPUT "${dns[@]}" -j ACCEPT
         else
-            iptables -A OUTPUT -d "$ns" -p "$proto" --dport 53 -m owner --uid-owner 0 -j ACCEPT
-            iptables -A OUTPUT -d "$ns" -p "$proto" --dport 53 -m owner --uid-owner "$PROXY_UID" -j ACCEPT
+            iptables -A OUTPUT "${dns[@]}" -m owner --uid-owner 0 -j ACCEPT
+            iptables -A OUTPUT "${dns[@]}" -m owner --uid-owner "$PROXY_UID" -j ACCEPT
+            iptables -A OUTPUT "${dns[@]}" -j REJECT --reject-with icmp-admin-prohibited
         fi
     done
     echo "DNS via $ns$([ "$agent_dns" = 1 ] && echo ' (agent too)')"
 done <<< "$resolvers"
+
+iptables -A OUTPUT -o lo -j ACCEPT
 
 # Never to private / special ranges (LAN, router, tailnet peers, metadata service)
 iptables -N NO-PRIVATE

@@ -105,4 +105,5 @@ done
 # ---------------------------------------------------------------------------
 /usr/local/bin/assemble-claude-md
 
+echo "Sandbox ready."
 exec setpriv --reuid=agent --regid=agent "$GROUPS_OPT" --inh-caps=-all -- "$@"
