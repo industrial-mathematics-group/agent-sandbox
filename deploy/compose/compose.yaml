@@ -45,13 +45,14 @@ services:
     env_file: [sandbox.env]
     environment:
       NODE_OPTIONS: --max-old-space-size=4096
-      POWERLEVEL9K_DISABLE_GITSTATUS: "true"
       GIT_CONFIG_COUNT: "1"
       GIT_CONFIG_KEY_0: safe.directory
       GIT_CONFIG_VALUE_0: "*"
     volumes:
       - ${WORKSPACE:-./workspace}:/workspace
       - claude:/home/agent/.claude
+      # Claude Code CLI, installed by the entrypoint (root-owned, read-only for the agent)
+      - claude-cli:/opt/claude-code
       - history:/commandhistory
       - cache:/home/agent/.cache
       - npm:/home/agent/.npm
@@ -73,6 +74,7 @@ services:
 # Shared by every sandbox on this machine (fixed names, no project prefix)
 volumes:
   claude:      { name: agent-sandbox-claude }
+  claude-cli:  { name: agent-sandbox-claude-cli }
   history:     { name: agent-sandbox-history }
   cache:       { name: agent-sandbox-cache }
   npm:         { name: agent-sandbox-npm }

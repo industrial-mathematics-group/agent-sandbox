@@ -1,0 +1,34 @@
+agent-sandbox
+=============
+
+The MIT license in LICENSE covers the files in this repository (Containerfiles,
+scripts, configuration and documentation). It does not cover the software that
+the container images are built from or download.
+
+Third-party software in the images
+----------------------------------
+The images are built from Debian, Alpine and upstream releases. Each component
+keeps its own license, for example:
+
+  - Debian trixie and Alpine packages (incl. git, zsh, tinyproxy, iptables,
+    GNU Octave and Octave Forge packages, Chromium, Mesa): various licenses,
+    many GPL/LGPL. License texts are in /usr/share/doc/<package>/copyright
+    (Debian) or the package metadata (Alpine). Sources are available from the
+    Debian and Alpine archives.
+  - Node.js (MIT and bundled licenses), Julia (MIT and bundled licenses),
+    uv (MIT or Apache-2.0), Tailscale (BSD-3-Clause), ROCm (various).
+    Sources are available from their upstream projects.
+
+Claude Code
+-----------
+Claude Code is NOT included in the images. It is downloaded from Anthropic
+when a container starts and is subject to Anthropic's terms
+(https://www.anthropic.com/legal). Anthropic's API and login are used under
+the terms of your own account.
+
+Design
+------
+The overall design (firewalled devcontainer for coding agents) is inspired by
+Anthropic's reference devcontainer for Claude Code. No files were copied from it.
+
+agent-sandbox is not an Anthropic product.

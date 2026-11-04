@@ -7,9 +7,9 @@
 #   standard  default. Only the proxy may connect out (ports 80/443/22, public IPs
 #             only); it enforces the allowlist by hostname. The agent itself can
 #             only reach the proxy on 127.0.0.1.
-#   strict    standard + the agent may also connect directly to the IPs the
-#             allowlist resolves to at startup (+ GitHub's published ranges), for
-#             tools that ignore proxy settings. IP-based, so coarse (shared CDN IPs).
+#   strict    standard + the agent may also connect directly to the addresses the
+#             allowlist resolves to at startup (+ GATEWAY_STRICT_CIDRS), for tools
+#             that ignore proxy settings. Address-based, so coarse (shared CDN IPs).
 #   open      like standard, but the proxy lets every public host through.
 #
 # Always: LAN, link-local, CGNAT/tailnet and IPv6 blocked; inbound closed except
@@ -49,33 +49,35 @@ iptables -X
 ipset destroy allowed-ips 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
-# strict: resolve the allowlist to IPs (+ GitHub meta ranges)
+# strict: look up every allowlisted name once and load the addresses into an
+# ipset in one batch. Wildcard entries contribute their apex only (subdomains
+# can't be enumerated); they keep working through the proxy. Extra networks
+# (e.g. a provider's published ranges) can be given as GATEWAY_STRICT_CIDRS.
 # ---------------------------------------------------------------------------
+is_ipv4_net() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}(/([0-9]|[12][0-9]|3[0-2]))?$ ]]; }
 if [ "$MODE" = strict ]; then
-    ipset create allowed-ips hash:net
-    echo "Fetching GitHub IP ranges..."
-    if gh_ranges=$(curl -fsS --connect-timeout 10 https://api.github.com/meta) \
-       && echo "$gh_ranges" | jq -e '.web and .api and .git' >/dev/null; then
-        n=0
-        while read -r cidr; do
-            [[ "$cidr" == *:* ]] && continue    # IPv6 is disabled
-            [[ "$cidr" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$ ]] || { echo "ERROR: bad CIDR from GitHub meta: $cidr" >&2; exit 1; }
-            ipset add -exist allowed-ips "$cidr"; n=$((n + 1))
-        done < <(echo "$gh_ranges" | jq -r '(.web + .api + .git)[]' | sort -u)
-        echo "Allowed GitHub ($n ranges)"
-    else
-        echo "WARN: could not fetch GitHub meta, GitHub only via the proxy"
-    fi
-    while read -r d; do
-        if [[ "$d" == \*.* ]]; then d=${d#\*.}; fi   # wildcards: only the apex can be resolved
-        ips=$(dig +noall +answer A "$d" | awk '$4 == "A" {print $5}')
-        if [ -z "$ips" ]; then echo "WARN: could not resolve $d"; continue; fi
-        while read -r ip; do
-            [[ "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || { echo "ERROR: bad IP for $d: $ip" >&2; exit 1; }
-            ipset add -exist allowed-ips "$ip"
-        done <<< "$ips"
+    batch=$(mktemp)
+    echo "create allowed-ips hash:net" > "$batch"
+    unresolved=()
+    while read -r name; do
+        name=${name#\*.}
+        found=0
+        for addr in $(dig +short +time=3 +tries=2 A "$name" 2>/dev/null); do
+            is_ipv4_net "$addr" || continue          # skips CNAME lines
+            echo "add allowed-ips $addr -exist" >> "$batch"; found=1
+        done
+        [ "$found" = 1 ] || unresolved+=("$name")
     done < "$DOMAINS"
-    echo "strict: direct access to $(ipset list allowed-ips | grep -c '^[0-9]') IPs/ranges"
+    IFS=' ,' read -r -a cidrs <<< "${GATEWAY_STRICT_CIDRS:-}"
+    for c in "${cidrs[@]}"; do
+        [ -n "$c" ] || continue
+        is_ipv4_net "$c" || { echo "ERROR: GATEWAY_STRICT_CIDRS: '$c' is not an IPv4 address/network" >&2; exit 1; }
+        echo "add allowed-ips $c -exist" >> "$batch"
+    done
+    ipset restore < "$batch"
+    rm -f "$batch"
+    [ ${#unresolved[@]} -eq 0 ] || echo "WARN: no IPv4 address for: ${unresolved[*]}"
+    echo "strict: direct access to $(ipset list allowed-ips | grep -cE '^[0-9]') addresses/networks"
 fi
 
 # ---------------------------------------------------------------------------

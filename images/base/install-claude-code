@@ -1,0 +1,63 @@
+#!/bin/bash
+# Installs the Claude Code CLI into /opt/claude-code at container start.
+# Called by the entrypoint as root, before it drops to `agent`, so the result is
+# root-owned and read-only for the agent. Downloads go through the gateway proxy
+# (claude.ai and downloads.claude.ai are on base.list).
+#
+#   CLAUDE_CODE_VERSION  "stable" (default), "latest" or an exact version
+#
+# Layout (meant to be a named volume shared by all sandboxes on the host):
+#   /opt/claude-code/versions/<version>/claude
+#   /opt/claude-code/bin/claude -> ../versions/<version>/claude
+#   /opt/claude-code/.checked-<channel>   last time a channel was resolved
+set -euo pipefail
+
+DIR=${CLAUDE_CODE_DIR:-/opt/claude-code}   # override only for tests
+WANT=${CLAUDE_CODE_VERSION:-stable}
+MAX_AGE_MIN=${CLAUDE_CODE_CHECK_MINUTES:-1440}
+
+[[ "$WANT" =~ ^(stable|latest|[0-9]+\.[0-9]+\.[0-9]+([-.][A-Za-z0-9.]+)?)$ ]] \
+    || { echo "install-claude-code: invalid CLAUDE_CODE_VERSION '$WANT'" >&2; exit 2; }
+
+install -d -m 0755 "$DIR" "$DIR/bin" "$DIR/versions"
+# Several sandboxes may share the volume and start at the same time
+exec 9>"$DIR/.lock"
+flock -w 300 9
+
+current() { [ -x "$DIR/bin/claude" ] && "$DIR/bin/claude" --version 2>/dev/null | awk '{print $1; exit}'; }
+
+if [[ "$WANT" =~ ^[0-9] ]]; then
+    if [ -x "$DIR/versions/$WANT/claude" ]; then
+        ln -sfn "../versions/$WANT/claude" "$DIR/bin/claude"
+        exit 0
+    fi
+else
+    stamp=$DIR/.checked-$WANT
+    if [ -x "$DIR/bin/claude" ] && [ -n "$(find "$stamp" -mmin -"$MAX_AGE_MIN" 2>/dev/null)" ]; then
+        exit 0
+    fi
+fi
+
+prev=$(current || true)
+echo "Installing Claude Code ($WANT) ..."
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+curl -fsSL --retry 3 https://claude.ai/install.sh -o "$tmp/install.sh"
+HOME="$tmp" bash "$tmp/install.sh" "$WANT" >"$tmp/install.log" 2>&1 \
+    || { cat "$tmp/install.log" >&2; exit 1; }
+bin=$(readlink -f "$tmp/.local/bin/claude")
+[ -x "$bin" ] || { cat "$tmp/install.log" >&2; echo "install-claude-code: installer left no binary" >&2; exit 1; }
+ver=$("$bin" --version | awk '{print $1; exit}')
+[[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]] || { echo "install-claude-code: unexpected version '$ver'" >&2; exit 1; }
+
+install -d -m 0755 "$DIR/versions/$ver"
+install -m 0755 "$bin" "$DIR/versions/$ver/claude"
+ln -sfn "../versions/$ver/claude" "$DIR/bin/claude"
+[[ "$WANT" =~ ^[0-9] ]] || touch "$DIR/.checked-$WANT"
+
+# Keep the three newest versions
+mapfile -t old < <(ls -1 "$DIR/versions" | sort -V | head -n -3)
+for v in "${old[@]}"; do
+    if [ "$v" != "$ver" ]; then rm -rf "${DIR:?}/versions/$v"; fi
+done
+echo "Claude Code $ver ready (before: ${prev:-none})"

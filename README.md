@@ -15,8 +15,9 @@ Sandboxed containers for running Claude Code (and similar coding agents) with
 - **Runs on** rootless Podman with Quadlet (systemd user services, recommended on
   Linux) or Docker / Podman Compose.
 
-Based on Anthropic's reference devcontainer, split into layers and hardened for rootless
-containers. Not an Anthropic product.
+The design is inspired by Anthropic's reference devcontainer (no files copied). Not an
+Anthropic product. Claude Code itself is not part of the images: it is downloaded from
+Anthropic when a container starts (see [What's isolated](#whats-isolated)).
 
 ```
 ┌─ network namespace of the gateway ──────────────────────────────────────────┐
@@ -31,8 +32,9 @@ containers. Not an Anthropic product.
 
 ## Images
 
-All images: `ghcr.io/OWNER/agent-sandbox:<flavor>` (also `<flavor>-YYYYMMDD` and
-`<flavor>-cc<claude-code-version>`), `linux/amd64` and `linux/arm64`.
+All images: `ghcr.io/OWNER/agent-sandbox:<flavor>` (also `<flavor>-YYYYMMDD`),
+`linux/amd64` and `linux/arm64`. The packages can stay private to your organization, see
+[Private registry](#private-registry).
 
 | Flavor | Chain | For |
 |---|---|---|
@@ -55,7 +57,7 @@ Gateway: `ghcr.io/OWNER/agent-sandbox-gateway:latest` (plain) and `:tailscale`.
 | base | `images/base` | Debian trixie, git, gh, delta, zsh, build tools, entrypoint |
 | language images | `images/node`, `images/python`, `images/julia`, `images/octave` | Node 26 LTS + corepack · uv · Julia (checksum-verified) · GNU Octave |
 | general add-ons (image layers) | `layers/xvfb`, `layers/chromium`, `layers/rocm` | Virtual X display + Mesa · headless Chromium · ROCm runtime |
-| Claude Code | `images/claude` | Native CLI, installed root-owned, auto-update off (last step of every image) |
+| final step | `images/final` | Proxy settings, managed CLAUDE.md, mount point for Claude Code (last step of every image) |
 | gateway | `gateway` | Firewall, proxy, allowlists (`gateway/lists/*.list`) |
 | specific add-ons | `addons/gpu-local`, `addons/gpu-remote`, `addons/slurm` | Local GPU drop-ins · remote GPU gateway · Slurm gateway |
 | deployment | `deploy/quadlet`, `deploy/compose` | Quadlet templates + `setup.sh` · Compose files |
@@ -134,7 +136,7 @@ and `GATEWAY_EXTRA_DOMAINS`. Entries are host names; `*.example.com` matches
 
 | List | Hosts |
 |---|---|
-| `base` | Anthropic API and login, GitHub (incl. `*.githubusercontent.com`) |
+| `base` | Anthropic API and login, Claude Code downloads (`downloads.claude.ai`), GitHub (incl. `*.githubusercontent.com`) |
 | `node` | npm, yarn, JSR, nodejs.org, Playwright downloads, Prisma engines, Google Fonts |
 | `python` | PyPI, PyTorch wheels |
 | `julia` | Pkg servers, Julia storage and binaries |
@@ -143,7 +145,7 @@ and `GATEWAY_EXTRA_DOMAINS`. Entries are host names; `*.example.com` matches
 | `GATEWAY_MODE` | What gets out |
 |---|---|
 | `standard` (default) | Only allowlisted hosts, checked by name in the proxy. No IP lists to go stale, wildcards work. |
-| `strict` | `standard`, plus direct connections to the IPs the allowlist resolves to at startup (and GitHub's ranges), for tools that ignore proxy settings. IP-based, so coarse. |
+| `strict` | `standard`, plus direct connections to the IPv4 addresses the allowlist resolves to at startup (plus networks in `GATEWAY_STRICT_CIDRS`), for tools that ignore proxy settings. IP-based, so coarse. |
 | `open` | Any public host through the proxy. LAN, metadata and IPv6 stay blocked. |
 
 Always: the agent can only reach the proxy; the proxy only connects to public IPs on
@@ -179,8 +181,8 @@ your ACLs and keep everything else towards the sandbox denied.
 | Network | See above. The rules live in the gateway; the agent has no network capabilities. Secrets for the gateway (Tailscale auth key) are only in `gateway.env`. |
 | Privileges | No sudo, `no-new-privileges`, all capabilities dropped (the entrypoint keeps SETUID/SETGID only to switch to `agent`). |
 | Resources | Memory, CPU and process limits per container, so a runaway test can't freeze the machine. |
-| Claude Code | Root-owned binary, auto-update off; updates come with the image (weekly rebuild + `podman auto-update` / `docker compose pull`). |
-| Persistence | Named volumes: `agent-sandbox-claude` (login, settings), `-history`, `-cache` (uv, npm, Playwright), `-npm`, `-uv-python`, `-julia-depot`, `-octave` (Forge packages). |
+| Claude Code | Installed at container start by `install-claude-code` (as root, before the switch to `agent`) into the root-owned volume `agent-sandbox-claude-cli`, so the agent can run but not replace it; its own auto-updater is off. `CLAUDE_CODE_VERSION` in `sandbox.env`: `stable` (default) or `latest` are checked at most once a day (`CLAUDE_CODE_CHECK_MINUTES`), an exact version such as `2.1.30` pins it. If the download fails, the version already in the volume is kept. Needs `claude.ai` and `downloads.claude.ai` (in `base.list`). |
+| Persistence | Named volumes: `agent-sandbox-claude` (login, settings), `-claude-cli` (Claude Code binaries), `-history`, `-cache` (uv, npm, Playwright), `-npm`, `-uv-python`, `-julia-depot`, `-octave` (Forge packages). |
 
 ## Graphics, browsers, dev servers
 
@@ -224,8 +226,10 @@ off.
 - **Git push:** no credentials are in the container on purpose. Commit inside, push from
   the host. If you want the agent to push, use a fine-grained token or deploy key scoped
   to that single repo.
-- **Update:** Quadlet: automatic via `podman-auto-update.timer` (`podman auto-update` by
-  hand). Compose: `docker compose pull && docker compose up -d`.
+- **Update:** images: Quadlet automatically via `podman-auto-update.timer` (`podman
+  auto-update` by hand), Compose `docker compose pull && docker compose up -d`. Claude
+  Code: restart the container (a channel is re-checked after a day; delete
+  `/opt/claude-code/.checked-*` as root to force it).
 - **Reset state:** stop the sandbox, then `podman volume rm agent-sandbox-julia-depot`
   (or another volume).
 
@@ -247,6 +251,8 @@ Start with the gateway log (`journalctl --user -u <name>-gateway -e` or
   sudo modprobe -a ip_set ip_set_hash_net xt_set xt_mark xt_owner xt_multiport tun
   printf '%s\n' ip_set ip_set_hash_net xt_set xt_mark xt_owner xt_multiport tun | sudo tee /etc/modules-load.d/agent-sandbox.conf
   ```
+- **`claude: command not found`:** the start-up install failed. The agent log says why;
+  usually `downloads.claude.ai` is not reachable through the gateway.
 - **Units don't exist after `daemon-reload`:** run `/usr/libexec/podman/quadlet -dryrun -user`;
   it prints the parsing error. Drop-ins and `Network=<name>.container` need Podman >= 5.0.
 - **Services stop when you log out:** linger is off. `sudo loginctl enable-linger agent-sandbox`.
@@ -293,15 +299,42 @@ To keep your Claude login, copy the old volume once:
 `podman run --rm -v claude-config:/from -v agent-sandbox-claude:/to docker.io/library/alpine cp -a /from/. /to/`
 (same for `claude-julia-depot` → `agent-sandbox-julia-depot`).
 
+## Private registry
+
+The images don't have to be public. Both registries keep packages private and readable
+by your organization:
+
+- **GHCR:** a new package is private. Under the package's settings, connect it to the
+  repository (or grant your organization's team read access); members then pull with a
+  personal access token with `read:packages`.
+- **Forgejo:** packages of an organization are visible to its members (set the
+  organization to private or limited to keep them from everyone else). Pull with a token
+  with package read access.
+
+Log in once as the user that pulls. For Quadlet that is the sandbox user, and the login
+must be in a file that `podman auto-update` and the systemd units also read:
+
+```bash
+podman login --authfile ~/.config/containers/auth.json ghcr.io     # or your Forgejo host
+docker login ghcr.io                                               # Compose with Docker
+```
+
 ## Publishing (maintainers)
 
 `.github/workflows/build.yml` builds every flavor for amd64 and arm64 on push to `main`,
 weekly and on demand, smoke-tests each image against the gateway (`tests/smoke.sh`),
-pushes to `ghcr.io/<owner>`, merges multi-arch tags and signs them with cosign
-(keyless). Pull requests build and test without pushing.
+pushes to `ghcr.io/<owner>` (private unless you change the package visibility), merges
+multi-arch tags and signs them with cosign (keyless). Pull requests build and test
+without pushing.
 
 `.forgejo/workflows/build.yml` is a manual (workflow_dispatch) test build for a Forgejo
 instance: it builds the flavors you pick on the runner `xeon` with Docker or Buildah,
-smoke-tests them and pushes to the Forgejo container registry (secret `REGISTRY_TOKEN`). Replace `OWNER` in this README,
-`deploy/compose/.env.example` and `deploy/quadlet/setup.sh` (or set
-`AGENT_SANDBOX_REGISTRY`) once the repository exists.
+smoke-tests them and pushes to the Forgejo container registry (secret `REGISTRY_TOKEN`).
+Replace `OWNER` in this README, `deploy/compose/.env.example` and
+`deploy/quadlet/setup.sh` (or set `AGENT_SANDBOX_REGISTRY`) once the repository exists.
+
+## License
+
+The files in this repository are MIT licensed ([LICENSE](LICENSE)). The images contain
+third-party software under its own licenses, and Claude Code is downloaded at runtime
+under Anthropic's terms; see [NOTICE](NOTICE).

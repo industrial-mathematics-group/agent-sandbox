@@ -1,6 +1,7 @@
 # agent-sandbox base: Debian trixie + shell tooling + entrypoint. No language
 # runtimes and no Claude Code yet: those come from the language images and the
-# final images/claude step (see build.sh for the chains).
+# final images/final step (see build.sh for the chains); Claude Code is installed
+# at container start (install-claude-code).
 #
 # No sudo and no firewall tools on purpose: the network is owned and filtered by
 # the gateway sidecar (gateway/), whose network namespace this container joins.
@@ -15,7 +16,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 # packages that compile at build time. netcat-openbsd: SSH through the gateway proxy.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl wget gnupg less procps man-db \
-      git git-delta gh openssh-client netcat-openbsd \
+      git git-delta gh openssh-client netcat-openbsd util-linux \
       zsh fzf nano vim-tiny jq unzip xz-utils zstd \
       iproute2 bind9-dnsutils tzdata locales \
       build-essential pkg-config \
@@ -31,7 +32,7 @@ RUN groupadd -g 1000 agent \
  && chown -R agent:agent /workspace /commandhistory /home/agent
 
 # The proxy variables (HTTPS_PROXY=127.0.0.1:3128 -> gateway) are set only in the
-# final images/claude step: set here, they would break every later build step.
+# final images/final step: set here, they would break every later build step.
 ENV LANG=en_US.UTF-8 \
     TZ=Etc/UTC \
     DEVCONTAINER=true \
@@ -50,26 +51,16 @@ RUN printf '%s\n' \
 
 WORKDIR /workspace
 
-USER agent
-ARG ZSH_IN_DOCKER_VERSION=1.2.0
-# Download first: `sh -c "$(wget …)"` would silently do nothing if the download failed
-RUN wget -qO /tmp/zsh-in-docker.sh "https://github.com/deluan/zsh-in-docker/releases/download/v${ZSH_IN_DOCKER_VERSION}/zsh-in-docker.sh" \
- && sh /tmp/zsh-in-docker.sh \
-      -p git -p fzf \
-      -a "source /usr/share/doc/fzf/examples/key-bindings.zsh" \
-      -a "source /usr/share/doc/fzf/examples/completion.zsh" \
-      -a "export HISTFILE=/commandhistory/.zsh_history" \
-      -x \
- && rm -f /tmp/zsh-in-docker.sh \
- && test -d /home/agent/.oh-my-zsh \
- && git config --global core.pager delta \
- && git config --global interactive.diffFilter 'delta --color-only'
-USER root
+# Shell: plain zsh config + delta as git pager (no framework download)
+COPY --chown=agent:agent --chmod=0644 zshrc /home/agent/.zshrc
+RUN git config --file /home/agent/.gitconfig core.pager delta \
+ && git config --file /home/agent/.gitconfig interactive.diffFilter 'delta --color-only' \
+ && chown agent:agent /home/agent/.gitconfig
 
 # Entrypoint + hooks. Layers add their own hooks to entrypoint.d (e.g. Xvfb) and
 # their CLAUDE.md fragments to claude-md/; the entrypoint assembles them.
 COPY --chmod=0755 entrypoint.sh /usr/local/bin/entrypoint.sh
-COPY --chmod=0755 assemble-claude-md /usr/local/bin/assemble-claude-md
+COPY --chmod=0755 assemble-claude-md install-claude-code /usr/local/bin/
 RUN install -d -m 0755 /usr/local/lib/agent-sandbox/entrypoint.d \
                        /usr/share/agent-sandbox/claude-md /opt/agent-sandbox/addons \
                        /etc/claude-code
