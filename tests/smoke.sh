@@ -13,13 +13,17 @@ TAG_SUFFIX=${TAG_SUFFIX:-}
 WORKSPACE=$(mktemp -d)
 chmod 777 "$WORKSPACE"
 export SANDBOX_NAME=smoke FLAVOR="$FLAVOR$TAG_SUFFIX" REGISTRY GATEWAY_TAG="${GATEWAY_TAG:-latest}" WORKSPACE PORT_1=3999 PORTS=3999 CPUS=1 MEMORY=4g   # limits that fit any runner
-tmp=$(mktemp -d)
 cp gateway.env.example gateway.env; cp sandbox.env.example sandbox.env; : > extra.list
 dc() { docker compose -p smoke "$@"; }
-cleanup() { dc logs --no-color > "$tmp/compose.log" 2>&1 || true; dc down -v >/dev/null 2>&1 || true; rm -f gateway.env sandbox.env extra.list; }
+show_logs() { echo "--- compose ps"; dc ps -a || true; echo "--- compose logs"; dc logs --no-color | tail -"${1:-50}" || true; }
+cleanup() { dc down -v >/dev/null 2>&1 || true; rm -f gateway.env sandbox.env extra.list; }
 trap cleanup EXIT
 
-dc up -d
+if ! dc up -d; then
+    echo "FAIL  compose up"
+    show_logs 80
+    exit 1
+fi
 for _ in $(seq 90); do
     dc logs agent 2>/dev/null | grep -q "Network ready" && break
     if ! dc ps --status running --services | grep -q agent; then break; fi
@@ -44,7 +48,7 @@ check "managed CLAUDE.md readable"   ok      test -r /etc/claude-code/CLAUDE.md
 check "managed CLAUDE.md read-only"  blocked test -w /etc/claude-code/CLAUDE.md
 
 if [ "$fail" = 1 ]; then
-    echo "--- compose logs"; dc logs --no-color | tail -50
+    show_logs
     exit 1
 fi
 echo "Smoke test passed for $FLAVOR."
