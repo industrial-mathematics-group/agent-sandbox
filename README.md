@@ -175,6 +175,11 @@ with ACLs; set `TS_AUTHKEY`, `TS_EXIT_NODE` (its `100.x.y.z` IP) and `TS_HOSTNAM
 Published ports are then reachable from your tailnet instead of localhost; allow them in
 your ACLs and keep everything else towards the sandbox denied.
 
+**Your own private services** (LAN, or tailnet hosts on `100.x`): private ranges are
+blocked even for allowlisted names. To reach one, allowlist its name and add its address to
+`GATEWAY_PRIVATE_ALLOW` in `gateway.env`, e.g. `GATEWAY_PRIVATE_ALLOW=100.85.46.4` (ports
+80/443/22, via `tailscale0` with Tailscale). Prefer single addresses over ranges.
+
 **Corporate proxy:** `GATEWAY_UPSTREAM_PROXY=host:port` chains the gateway's proxy to it.
 
 ## What's isolated
