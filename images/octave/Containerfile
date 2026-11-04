@@ -1,6 +1,6 @@
 # GNU Octave (MATLAB-compatible) from Debian, plus a starter set of Octave Forge
 # packages that Debian ships prebuilt. More packages: `pkg install -forge <name>`
-# at runtime (compiled with mkoctfile from liboctave-dev, needs the octave
+# at runtime (compiled with mkoctfile from octave-dev, needs the octave
 # allowlist profile).
 ARG BASE=localhost/agent-sandbox-stage:base
 FROM ${BASE}
@@ -11,7 +11,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 # gnuplot-nox: plots to files without a display (also works without the xvfb layer)
 ARG OCTAVE_PACKAGES="octave-signal octave-statistics octave-control octave-optim octave-io octave-image octave-symbolic"
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      octave liboctave-dev gnuplot-nox texinfo ${OCTAVE_PACKAGES} \
+      octave octave-dev gnuplot-nox texinfo ${OCTAVE_PACKAGES} \
     && apt-get clean && rm -rf /var/lib/apt/lists/* \
  && octave-cli --no-gui --eval 'disp(version()); pkg list'
 
