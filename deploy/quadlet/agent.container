@@ -31,7 +31,6 @@ PodmanArgs=--shm-size=1g --memory=@MEMORY@ --cpus=@CPUS@
 
 EnvironmentFile=@CONFIG_DIR@/sandbox.env
 Environment=NODE_OPTIONS=--max-old-space-size=4096
-Environment=POWERLEVEL9K_DISABLE_GITSTATUS=true
 # Project files are owned by two host users; tell git that's fine in here
 Environment=GIT_CONFIG_COUNT=1
 Environment=GIT_CONFIG_KEY_0=safe.directory
@@ -41,6 +40,8 @@ Environment=GIT_CONFIG_VALUE_0=*
 Volume=@WORKSPACE@:/workspace
 # Shared between instances: Claude login/settings, history, language caches
 Volume=agent-sandbox-claude:/home/agent/.claude
+# Claude Code CLI, installed by the entrypoint (root-owned, read-only for the agent)
+Volume=agent-sandbox-claude-cli:/opt/claude-code
 Volume=agent-sandbox-history:/commandhistory
 Volume=agent-sandbox-cache:/home/agent/.cache
 @LANG_VOLUMES@

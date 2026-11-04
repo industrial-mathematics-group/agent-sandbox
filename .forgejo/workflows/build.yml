@@ -2,6 +2,7 @@
 # flavors and gateway variants, smoke-tests them (Docker only) and pushes them to
 # this Forgejo instance's container registry:
 #   <host>/<owner>/agent-sandbox:<flavor>             (+ <flavor>-YYYYMMDD, <flavor>-sha-xxxxxxx)
+# Packages of an organization are visible to its members (private/limited org).
 #   <host>/<owner>/agent-sandbox-gateway:latest       (+ :tailscale, same extra tags)
 #
 # One-time setup (repo → Settings → Actions):
@@ -83,21 +84,18 @@ jobs:
           echo "date_tag=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
           echo "sha_tag=sha-${SHA::7}" >> "$GITHUB_OUTPUT"
 
-          # Exact versions as build args, so the layer cache is invalidated exactly
-          # when a new release exists ("stable"/"latest" would stay cached forever).
-          claude=$(curl -fsSL https://registry.npmjs.org/@anthropic-ai/claude-code/latest | jq -r .version)
+          # Exact Julia version as build arg, so the layer cache is invalidated exactly
+          # when a new release exists ("latest" would stay cached forever).
+          # (Claude Code isn't in the images; the entrypoint installs it at start.)
           if [ -n "$JULIA_PIN" ] && [ "$JULIA_PIN" != latest ]; then
             julia=$JULIA_PIN
           else
             julia=$(curl -fsSL https://julialang-s3.julialang.org/bin/versions.json \
               | jq -r 'to_entries | map(select(.value.stable)) | sort_by(.key | split(".") | map(tonumber)) | last | .key')
           fi
-          for v in "$claude" "$julia"; do
-            [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::bad version '$v'"; exit 1; }
-          done
-          echo "claude=$claude" >> "$GITHUB_OUTPUT"
+          [[ "$julia" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::bad Julia version '$julia'"; exit 1; }
           echo "julia=$julia" >> "$GITHUB_OUTPUT"
-          echo "Registry $registry/$owner, Claude Code $claude, Julia $julia"
+          echo "Registry $registry/$owner, Julia $julia"
 
       - name: Log in to registry
         env:
@@ -117,7 +115,6 @@ jobs:
           BUILDER: ${{ steps.builder.outputs.cmd }}
           REPO: ${{ steps.meta.outputs.repo }}
           TARGETS: ${{ inputs.targets }}
-          CLAUDE_CODE_VERSION: ${{ steps.meta.outputs.claude }}
           JULIA_VERSION: ${{ steps.meta.outputs.julia }}
           ROCM_VERSION: ${{ vars.ROCM_VERSION }}
           ROCM_SUITE: ${{ vars.ROCM_SUITE }}
@@ -159,7 +156,6 @@ jobs:
           TARGETS: ${{ inputs.targets }}
           DATE_TAG: ${{ steps.meta.outputs.date_tag }}
           SHA_TAG: ${{ steps.meta.outputs.sha_tag }}
-          CLAUDE: ${{ steps.meta.outputs.claude }}
         run: |
           echo "### Pushed" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
           images=()
@@ -175,7 +171,6 @@ jobs:
           done
           for img in "${images[@]}"; do
             tags=("$img" "$img-$DATE_TAG" "$img-$SHA_TAG")
-            case "$img" in */agent-sandbox:*) tags+=("$img-cc$CLAUDE") ;; esac
             for t in "${tags[@]:1}"; do $BUILDER tag "$img" "$t"; done
             for t in "${tags[@]}"; do
               $BUILDER push "$t"

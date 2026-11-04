@@ -7,13 +7,14 @@
 #   ./build.sh --registry ghcr.io/me --tag-suffix -amd64 --push node
 #   ./build.sh --engine buildah node   # daemonless (CI runners without Docker)
 #
-# Every flavor is a chain: images/base -> its layers -> images/claude.
+# Every flavor is a chain: images/base -> its layers -> images/final.
+# Claude Code is not part of any image: the entrypoint installs it at start.
 # Each step is a normal `podman/docker build` with --build-arg BASE=<previous
 # step>, so there is nothing engine-specific. Shared prefixes (base, base+python …)
 # are built once per run and come from the build cache after that.
 #
 # Version pins (all optional, passed through as build args when set):
-#   CLAUDE_CODE_VERSION  JULIA_VERSION  NODE_VERSION  UV_VERSION  ROCM_VERSION  ROCM_SUITE
+#   JULIA_VERSION  NODE_VERSION  UV_VERSION  ROCM_VERSION  ROCM_SUITE
 # EXTRA_BUILD_FLAGS is appended to every build (e.g. "--network host" behind a proxy).
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -48,10 +49,10 @@ while [ $# -gt 0 ]; do
         --tag-suffix) SUFFIX=$2; shift 2 ;;
         --push)       PUSH=1; shift ;;
         --list)
-            for f in $FLAVOR_ORDER; do printf '%-14s base %s claude\n' "$f" "$(echo "${CHAIN[$f]}" | sed 's|images/||g; s|layers/|+|g')"; done
+            for f in $FLAVOR_ORDER; do printf '%-14s base %s\n' "$f" "$(echo "${CHAIN[$f]}" | sed 's|images/||g; s|layers/|+|g')"; done
             printf '%-14s gateway (plain)\n%-14s gateway (Tailscale exit node)\n' gateway gateway-tailscale
             exit 0 ;;
-        -h|--help)    sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)    sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         -*)           echo "unknown option $1" >&2; exit 2 ;;
         *)            targets+=("$1"); shift ;;
     esac
@@ -63,7 +64,7 @@ if [ -z "$ENGINE" ]; then
 fi
 
 version_args=()
-for v in CLAUDE_CODE_VERSION JULIA_VERSION NODE_VERSION UV_VERSION ROCM_VERSION ROCM_SUITE; do
+for v in JULIA_VERSION NODE_VERSION UV_VERSION ROCM_VERSION ROCM_SUITE; do
     [ -n "${!v:-}" ] && version_args+=(--build-arg "$v=${!v}")
 done
 # shellcheck disable=SC2206  # intentional word splitting
@@ -91,7 +92,7 @@ build_flavor() {
         prev=$tag
     done
     tag="$REGISTRY/agent-sandbox:$flavor$SUFFIX"
-    build images/claude "$tag" --build-arg "BASE=$prev" --build-arg "FLAVOR=$flavor"
+    build images/final "$tag" --build-arg "BASE=$prev" --build-arg "FLAVOR=$flavor"
     [ "$PUSH" = 1 ] && "$ENGINE" push "$tag"
     return 0
 }

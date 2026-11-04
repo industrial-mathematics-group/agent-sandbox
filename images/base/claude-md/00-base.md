@@ -34,6 +34,8 @@ Only `/workspace` (on the host), `~/.claude` (Claude Code settings and memory) a
 the language caches listed below survive a restart or image update. Everything else
 is reset on update, including global `npm install -g`, files in `/tmp` and anything
 outside these paths. Put project tooling into the project.
+Claude Code itself is managed by the container (root-owned, updated at start); don't
+try to install or update it.
 
 ## Resources
 

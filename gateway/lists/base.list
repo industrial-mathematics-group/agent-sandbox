@@ -1,9 +1,10 @@
 # Always loaded. One host per line; "*.example.com" matches example.com and all
 # its subdomains. Lines starting with # are comments.
 
-# Claude API + login (Pro/Max OAuth)
+# Claude API + login (Pro/Max OAuth); Claude Code downloads (installed at start)
 api.anthropic.com
 claude.ai
+downloads.claude.ai
 console.anthropic.com
 platform.claude.com
 

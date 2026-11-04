@@ -53,6 +53,19 @@ if [ "${SANDBOX_SKIP_NETWORK_CHECK:-0}" != 1 ]; then
     echo "Network ready (egress only through the gateway)."
 fi
 
+# ---------------------------------------------------------------------------
+# Claude Code: installed/updated at start into the root-owned /opt/claude-code
+# (not part of the image). A failed update keeps the version already there.
+# ---------------------------------------------------------------------------
+if ! /usr/local/bin/install-claude-code; then
+    if [ -x /opt/claude-code/bin/claude ]; then
+        echo "WARN: Claude Code update failed, keeping $(/opt/claude-code/bin/claude --version 2>/dev/null | head -1)" >&2
+    else
+        echo "WARN: Claude Code could not be installed; \`claude\` is unavailable. Check the gateway log" \
+             "(claude.ai and downloads.claude.ai must be allowed)." >&2
+    fi
+fi
+
 export HOME=/home/agent USER=agent LOGNAME=agent
 cd /workspace
 

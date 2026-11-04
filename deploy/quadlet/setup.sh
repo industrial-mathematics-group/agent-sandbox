@@ -281,6 +281,7 @@ $( [ "$SAME_USER" = 0 ] && echo "  sudo machinectl shell $SANDBOX_USER@" )
   nano ${CONFIG_DIR/#$SB_HOME/\~}/gateway.env       # mode, profiles$( [ "$NET" = tailscale ] && echo ', TS_AUTHKEY, TS_EXIT_NODE' )
   nano ${CONFIG_DIR/#$SB_HOME/\~}/extra.list        # your own allowed hosts
 $( for a in "${ADDONS[@]}"; do echo "  nano ${CONFIG_DIR/#$SB_HOME/\~}/$a.env   # + SSH key in ${CONFIG_DIR/#$SB_HOME/\~}/${a%%-*}-ssh/ (addons/$a/README.md)"; done )
+$( case "$IMAGE" in localhost/*) ;; *) echo "  podman login --authfile ~/.config/containers/auth.json ${IMAGE%%/*}   # private packages: once";; esac )
   /usr/libexec/podman/quadlet -dryrun -user | less   # check the generated units
   systemctl --user daemon-reload
   systemctl --user start $NAME-gateway $NAME

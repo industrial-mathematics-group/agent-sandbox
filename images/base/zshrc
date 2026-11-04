@@ -1,0 +1,25 @@
+# agent-sandbox zsh setup (installed as ~/.zshrc; reset on image updates).
+# Plain zsh, no framework: history, completion, fzf keys and a git-aware prompt.
+
+HISTFILE=/commandhistory/.zsh_history
+HISTSIZE=50000
+SAVEHIST=50000
+setopt APPEND_HISTORY INC_APPEND_HISTORY HIST_IGNORE_DUPS HIST_IGNORE_SPACE EXTENDED_HISTORY
+setopt AUTO_CD INTERACTIVE_COMMENTS NO_BEEP PROMPT_SUBST
+
+autoload -Uz compinit && compinit -d "${XDG_CACHE_HOME:-$HOME/.cache}/zcompdump"
+zstyle ':completion:*' menu select
+zstyle ':completion:*' matcher-list 'm:{a-z}={A-Za-z}'
+
+bindkey -e
+for f in /usr/share/doc/fzf/examples/key-bindings.zsh /usr/share/doc/fzf/examples/completion.zsh; do
+    [ -r "$f" ] && source "$f"
+done
+
+autoload -Uz vcs_info
+zstyle ':vcs_info:git:*' formats ' %F{magenta}(%b)%f'
+zstyle ':vcs_info:git:*' actionformats ' %F{magenta}(%b|%a)%f'
+precmd() { vcs_info }
+PROMPT='%F{cyan}sandbox%f:%F{blue}%~%f${vcs_info_msg_0_} %(?.%F{green}.%F{red})%#%f '
+
+alias ll='ls -lah --color=auto' ls='ls --color=auto' grep='grep --color=auto'

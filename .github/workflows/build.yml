@@ -1,7 +1,9 @@
 # Builds and publishes all images to GHCR:
-#   ghcr.io/<owner>/agent-sandbox:<flavor>          (+ <flavor>-YYYYMMDD, <flavor>-cc<version>)
+#   ghcr.io/<owner>/agent-sandbox:<flavor>          (+ <flavor>-YYYYMMDD)
 #   ghcr.io/<owner>/agent-sandbox-gateway:latest    (+ :tailscale, and -YYYYMMDD variants)
-# On push to main, weekly (new Claude Code / Julia releases) and on demand.
+# On push to main, weekly (new Julia releases, base image fixes) and on demand.
+# Images are pushed to the owner's namespace; GHCR keeps new packages private
+# (grant your organization read access in the package settings).
 # Pull requests build and smoke-test without pushing.
 name: build
 
@@ -27,14 +29,12 @@ jobs:
     outputs:
       registry: ${{ steps.v.outputs.registry }}
       date: ${{ steps.v.outputs.date }}
-      claude: ${{ steps.v.outputs.claude }}
       julia: ${{ steps.v.outputs.julia }}
     steps:
       - id: v
         run: |
           echo "registry=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
           echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
-          echo "claude=$(npm view @anthropic-ai/claude-code version)" >> "$GITHUB_OUTPUT"
           echo "julia=$(curl -fsSL https://julialang-s3.julialang.org/bin/versions.json \
             | jq -r 'to_entries | map(select(.value.stable)) | sort_by(.key | split(".") | map(tonumber)) | last | .key')" >> "$GITHUB_OUTPUT"
 
@@ -83,7 +83,6 @@ jobs:
     runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     env:
       REGISTRY: ${{ needs.versions.outputs.registry }}
-      CLAUDE_CODE_VERSION: ${{ needs.versions.outputs.claude }}
       JULIA_VERSION: ${{ needs.versions.outputs.julia }}
     steps:
       - uses: actions/checkout@v4
@@ -125,7 +124,6 @@ jobs:
           docker buildx imagetools create \
             -t "$IMG:$f" \
             -t "$IMG:$f-${{ needs.versions.outputs.date }}" \
-            -t "$IMG:$f-cc${{ needs.versions.outputs.claude }}" \
             "${srcs[@]}"
           digest=$(docker buildx imagetools inspect "$IMG:$f" --format '{{json .Manifest}}' | jq -r .digest)
           cosign sign --yes "$IMG@$digest"
