@@ -1,0 +1,184 @@
+# Manual test build on the Forgejo runner "xeon": builds the selected agent-sandbox
+# flavors and gateway variants, smoke-tests them (Docker only) and pushes them to
+# this Forgejo instance's container registry:
+#   <host>/<owner>/agent-sandbox:<flavor>             (+ <flavor>-YYYYMMDD, <flavor>-sha-xxxxxxx)
+#   <host>/<owner>/agent-sandbox-gateway:latest       (+ :tailscale, same extra tags)
+#
+# One-time setup (repo → Settings → Actions):
+#   Secrets:   REGISTRY_TOKEN  personal access token with "write:package" scope
+#                              (the automatic job token can't push packages)
+#   Variables (optional):
+#              REGISTRY_USER   account the token belongs to (default: repo owner)
+#              REGISTRY        registry host if it differs from the Forgejo URL
+#              JULIA_VERSION   default: latest stable
+#              ROCM_VERSION, ROCM_SUITE   for full-rocm (defaults in layers/rocm)
+#
+# Builder: Docker if the job can reach a Docker daemon, otherwise Buildah
+# (daemonless: chroot isolation + vfs storage, no privileges; no smoke test then).
+
+name: Build agent-sandbox (test)
+
+on:
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: "Flavors and gateways to build (./build.sh --list), space separated"
+        default: "full gateway gateway-tailscale"
+      push:
+        description: "Push to the registry after the smoke test"
+        type: boolean
+        default: true
+      smoke:
+        description: "Run tests/smoke.sh against each flavor (needs Docker + compose)"
+        type: boolean
+        default: true
+
+jobs:
+  build:
+    runs-on: xeon
+    timeout-minutes: 180
+    env:
+      # Buildah only: run without privileges inside the job container
+      BUILDAH_ISOLATION: chroot
+      STORAGE_DRIVER: vfs
+      BUILDAH_FORMAT: docker
+      DOCKER_BUILDKIT: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pick builder
+        id: builder
+        run: |
+          SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo"
+          if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+            echo "Using Docker"
+            echo "cmd=docker" >> "$GITHUB_OUTPUT"
+            pkgs="jq"
+          else
+            echo "No Docker daemon available, installing Buildah"
+            echo "cmd=buildah" >> "$GITHUB_OUTPUT"
+            pkgs="buildah fuse-overlayfs uidmap jq"
+          fi
+          missing=""
+          for p in $pkgs; do command -v "${p%%-*}" >/dev/null 2>&1 || missing="$missing $p"; done
+          if [ -n "$missing" ]; then
+            $SUDO apt-get update -qq
+            $SUDO apt-get install -y -qq --no-install-recommends $missing
+          fi
+
+      - name: Compute names and versions
+        id: meta
+        env:
+          SERVER_URL: ${{ github.server_url }}
+          OWNER: ${{ github.repository_owner }}
+          REGISTRY_VAR: ${{ vars.REGISTRY }}
+          SHA: ${{ github.sha }}
+          JULIA_PIN: ${{ vars.JULIA_VERSION }}
+        run: |
+          registry=${REGISTRY_VAR:-${SERVER_URL#*://}}
+          registry=${registry%/}
+          owner=$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')
+          echo "registry=$registry" >> "$GITHUB_OUTPUT"
+          echo "repo=$registry/$owner" >> "$GITHUB_OUTPUT"
+          echo "date_tag=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+          echo "sha_tag=sha-${SHA::7}" >> "$GITHUB_OUTPUT"
+
+          # Exact versions as build args, so the layer cache is invalidated exactly
+          # when a new release exists ("stable"/"latest" would stay cached forever).
+          claude=$(curl -fsSL https://registry.npmjs.org/@anthropic-ai/claude-code/latest | jq -r .version)
+          if [ -n "$JULIA_PIN" ] && [ "$JULIA_PIN" != latest ]; then
+            julia=$JULIA_PIN
+          else
+            julia=$(curl -fsSL https://julialang-s3.julialang.org/bin/versions.json \
+              | jq -r 'to_entries | map(select(.value.stable)) | sort_by(.key | split(".") | map(tonumber)) | last | .key')
+          fi
+          for v in "$claude" "$julia"; do
+            [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::bad version '$v'"; exit 1; }
+          done
+          echo "claude=$claude" >> "$GITHUB_OUTPUT"
+          echo "julia=$julia" >> "$GITHUB_OUTPUT"
+          echo "Registry $registry/$owner, Claude Code $claude, Julia $julia"
+
+      - name: Log in to registry
+        env:
+          BUILDER: ${{ steps.builder.outputs.cmd }}
+          REGISTRY: ${{ steps.meta.outputs.registry }}
+          REGISTRY_USER: ${{ vars.REGISTRY_USER || github.repository_owner }}
+          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+        run: |
+          if [ -z "$REGISTRY_TOKEN" ]; then
+            echo "::error::Secret REGISTRY_TOKEN is not set (needs write:package scope)"
+            exit 1
+          fi
+          echo "$REGISTRY_TOKEN" | $BUILDER login --username "$REGISTRY_USER" --password-stdin "$REGISTRY"
+
+      - name: Build
+        env:
+          BUILDER: ${{ steps.builder.outputs.cmd }}
+          REPO: ${{ steps.meta.outputs.repo }}
+          TARGETS: ${{ inputs.targets }}
+          CLAUDE_CODE_VERSION: ${{ steps.meta.outputs.claude }}
+          JULIA_VERSION: ${{ steps.meta.outputs.julia }}
+          ROCM_VERSION: ${{ vars.ROCM_VERSION }}
+          ROCM_SUITE: ${{ vars.ROCM_SUITE }}
+          EXTRA_BUILD_FLAGS: >-
+            --label org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            --label org.opencontainers.image.revision=${{ github.sha }}
+        run: |
+          [ -n "$ROCM_VERSION" ] || unset ROCM_VERSION
+          [ -n "$ROCM_SUITE" ] || unset ROCM_SUITE
+          # Base images (debian, alpine, tailscale, node, uv) come from the builder's
+          # cache; refresh them first so security fixes land in the build.
+          for b in docker.io/library/debian:trixie-slim docker.io/library/alpine:3.22 docker.io/tailscale/tailscale:stable; do
+            $BUILDER pull -q "$b" >/dev/null || echo "::warning::could not pull $b"
+          done
+          # shellcheck disable=SC2086
+          ./build.sh --engine "$BUILDER" --registry "$REPO" $TARGETS
+
+      - name: Smoke test
+        if: (inputs.smoke == true || inputs.smoke == 'true') && steps.builder.outputs.cmd == 'docker'
+        timeout-minutes: 30
+        env:
+          REPO: ${{ steps.meta.outputs.repo }}
+          TARGETS: ${{ inputs.targets }}
+        run: |
+          docker compose version >/dev/null || { echo "::warning::docker compose not available, skipping"; exit 0; }
+          # The smoke test needs the plain gateway; build it if it wasn't selected
+          case " $TARGETS " in *" gateway "*|*" all "*) ;; *) ./build.sh --engine docker --registry "$REPO" gateway ;; esac
+          flavors=$(for t in $TARGETS; do case "$t" in gateway*) ;; all) ./build.sh --list | awk '!/^gateway/ {print $1}' ;; *) echo "$t" ;; esac; done)
+          for f in $flavors; do
+            echo "=== $f"
+            tests/smoke.sh "$f" "$REPO"
+          done
+
+      - name: Tag and push
+        if: inputs.push == true || inputs.push == 'true'
+        env:
+          BUILDER: ${{ steps.builder.outputs.cmd }}
+          REPO: ${{ steps.meta.outputs.repo }}
+          TARGETS: ${{ inputs.targets }}
+          DATE_TAG: ${{ steps.meta.outputs.date_tag }}
+          SHA_TAG: ${{ steps.meta.outputs.sha_tag }}
+          CLAUDE: ${{ steps.meta.outputs.claude }}
+        run: |
+          echo "### Pushed" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          images=()
+          for t in $TARGETS; do
+            case "$t" in
+              gateway)           images+=("$REPO/agent-sandbox-gateway:latest") ;;
+              gateway-tailscale) images+=("$REPO/agent-sandbox-gateway:tailscale") ;;
+              all)
+                for f in $(./build.sh --list | awk '!/^gateway/ {print $1}'); do images+=("$REPO/agent-sandbox:$f"); done
+                images+=("$REPO/agent-sandbox-gateway:latest" "$REPO/agent-sandbox-gateway:tailscale") ;;
+              *)                 images+=("$REPO/agent-sandbox:$t") ;;
+            esac
+          done
+          for img in "${images[@]}"; do
+            tags=("$img" "$img-$DATE_TAG" "$img-$SHA_TAG")
+            case "$img" in */agent-sandbox:*) tags+=("$img-cc$CLAUDE") ;; esac
+            for t in "${tags[@]:1}"; do $BUILDER tag "$img" "$t"; done
+            for t in "${tags[@]}"; do
+              $BUILDER push "$t"
+              echo "- \`$t\`" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+            done
+          done
