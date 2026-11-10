@@ -82,33 +82,53 @@ drop_to_agent() {
 }
 
 # ---------------------------------------------------------------------------
-# 2. Add-ons mounted under /opt/agent-sandbox/addons/<name>/ (bin/, claude.md).
-#    Their commands are linked into /opt/agent-sandbox/bin, which is on the
-#    image PATH: a PATH set here would reach only this process, not the shells
-#    and `claude` sessions started later with `podman exec` / `docker exec`.
+# 2. Add-ons mounted under /opt/agent-sandbox/addons/<name>/ (bin/, claude.md,
+#    entrypoint.d/). The mounts belong to the host user (= agent) and are
+#    usually mode 0700, and this root has no CAP_DAC_OVERRIDE (all capabilities
+#    are dropped), so it can't look inside them: list and read them as agent.
+#
+#    Commands are linked into /opt/agent-sandbox/bin, which is on the image
+#    PATH: a PATH set here would reach only this process, not the shells and
+#    `claude` sessions started later with `podman exec` / `docker exec`.
 # ---------------------------------------------------------------------------
+addon_files() {   # addon_files <find -path pattern> [find tests...]: NUL-separated, sorted
+    local pattern=$1; shift
+    drop_to_agent find /opt/agent-sandbox/addons/ -mindepth 3 -maxdepth 3 -path "$pattern" "$@" -print0 2>/dev/null \
+        | sort -z
+}
 install -d -m 0755 /opt/agent-sandbox/bin
 find /opt/agent-sandbox/bin -mindepth 1 -maxdepth 1 -type l -delete
-for f in /opt/agent-sandbox/addons/*/bin/*; do
-    [ -f "$f" ] && [ -x "$f" ] || continue
+mapfile -d '' -t addon_bins < <(addon_files '*/bin/*' \( -type f -o -type l \) -executable)
+for f in "${addon_bins[@]}"; do
     ln -sfn "$f" "/opt/agent-sandbox/bin/${f##*/}"
 done
-if compgen -G '/opt/agent-sandbox/addons/*' >/dev/null && ! compgen -G '/opt/agent-sandbox/bin/*' >/dev/null; then
-    echo "WARN: add-ons are mounted under /opt/agent-sandbox/addons but no command in their bin/" \
-         "is readable (SELinux host: keep the :z label on the add-on volume)." >&2
+if compgen -G '/opt/agent-sandbox/addons/*' >/dev/null && [ "${#addon_bins[@]}" = 0 ]; then
+    echo "WARN: add-ons are mounted under /opt/agent-sandbox/addons, but agent can't run any" \
+         "command in their bin/. Check the host folder's owner and permissions" \
+         "(SELinux host: keep the :z label on the add-on volume)." >&2
 fi
+unset addon_bins
 
 # ---------------------------------------------------------------------------
 # 3. Layer hooks (e.g. Xvfb from layers/xvfb). Sourced as root; they start
 #    their own processes with drop_to_agent. Add-ons can ship their own
 #    (/opt/agent-sandbox/addons/<name>/entrypoint.d/), e.g. git-remote writes
-#    /etc/gitconfig, notify installs Claude Code hooks.
+#    /etc/gitconfig, notify installs Claude Code hooks; those are read as agent.
 # ---------------------------------------------------------------------------
-for hook in /usr/local/lib/agent-sandbox/entrypoint.d/*.sh /opt/agent-sandbox/addons/*/entrypoint.d/*.sh; do
+for hook in /usr/local/lib/agent-sandbox/entrypoint.d/*.sh; do
     [ -r "$hook" ] || continue
     # shellcheck source=/dev/null
     . "$hook"
 done
+mapfile -d '' -t addon_hooks < <(addon_files '*/entrypoint.d/*.sh' -type f)
+for hook in "${addon_hooks[@]}"; do
+    if ! hook_src=$(drop_to_agent cat "$hook"); then
+        echo "WARN: $hook is not readable by agent; skipped." >&2
+        continue
+    fi
+    eval "$hook_src"
+done
+unset addon_hooks hook_src
 
 # ---------------------------------------------------------------------------
 # 4. Managed CLAUDE.md: image fragments + mounted add-on fragments. Root-owned,
