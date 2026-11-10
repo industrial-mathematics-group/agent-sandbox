@@ -229,8 +229,9 @@ own chain in `build.sh`. Specific add-ons (`addons/`) are switched on per instan
 | [notify](addons/notify/README.md) | Push notifications (ntfy, Gotify, Discord, Slack, webhook) when Claude needs you, plus a `notify` command | `--addon notify` / `addons/notify/compose.yaml` |
 
 A specific add-on mounts its client (`bin/`), its `claude.md` and optional start-up hooks
-(`entrypoint.d/`) read-only into `/opt/agent-sandbox/addons/<name>/`; the entrypoint adds
-it to `PATH` and to the managed CLAUDE.md and runs the hooks. Its settings live in
+(`entrypoint.d/`) read-only into `/opt/agent-sandbox/addons/<name>/`; the entrypoint links
+its commands into `/opt/agent-sandbox/bin` (on `PATH`, also for `podman exec`), adds it to
+the managed CLAUDE.md and runs the hooks. Its settings live in
 `<name>.env` next to `gateway.env`.
 
 **Firewall:** the add-on's env file is also mounted into the gateway
