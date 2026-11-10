@@ -7,6 +7,12 @@
 #   /etc/agent-sandbox/extra.list                 mounted from the host, if present
 #   GATEWAY_EXTRA_DOMAINS                         space or comma separated
 #   JULIA_PKG_SERVER                              its host, if set
+#   /etc/agent-sandbox/addons/<addon>.env         env files of enabled add-ons, mounted
+#                                                 read-only: every *_HOST and *_URL value
+#                                                 is allowlisted (URL -> its host), every
+#                                                 *_PRIVATE_IP value goes to private-allow.
+#                                                 Parsed, never sourced; other keys
+#                                                 (tokens) are ignored.
 #
 # GATEWAY_UPSTREAM_PROXY=host:port chains the proxy to an existing HTTP proxy
 # (corporate networks); the firewall then only lets the proxy talk to that one.
@@ -14,6 +20,7 @@
 # Output in /run/agent-gateway/:
 #   domains          one entry per line ("*.example.com" = domain + subdomains)
 #   filter           tinyproxy filter (extended regex, one per entry)
+#   private-allow    private addresses from add-ons (read by init-firewall.sh)
 #   tinyproxy.conf
 set -euo pipefail
 IFS=$'\n\t'
@@ -52,10 +59,38 @@ if [ -n "$EXTRA" ]; then
     IFS=' ,' read -r -a extra <<< "$EXTRA"
     for d in "${extra[@]}"; do if [ -n "$d" ]; then entries+=("$d"); fi; done
 fi
+url_host() {   # url_host <host | scheme://[user@]host[:port]/path>
+    local h=${1#*://}
+    h=${h%%/*}; h=${h##*@}; h=${h%%:*}
+    printf '%s' "$h"
+}
 if [ -n "${JULIA_PKG_SERVER:-}" ]; then
-    h=${JULIA_PKG_SERVER#*://}; h=${h%%/*}; h=${h%%:*}
-    entries+=("$h")
+    entries+=("$(url_host "$JULIA_PKG_SERVER")")
 fi
+
+# Add-ons: hosts and private addresses from their env files
+: > "$OUT/private-allow"
+for f in /etc/agent-sandbox/addons/*.env; do
+    [ -f "$f" ] && [ -r "$f" ] || continue   # Compose turns a missing file into a directory
+    addon=$(basename "$f" .env)
+    added=()
+    while IFS= read -r line || [ -n "$line" ]; do
+        [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?([A-Z][A-Z0-9_]*)=(.*)$ ]] || continue
+        key=${BASH_REMATCH[2]} val=${BASH_REMATCH[3]}
+        val=${val%%[[:space:]]#*}                        # trailing comment
+        val=${val#[\"\']}; val=${val%[\"\']}              # surrounding quotes
+        [ -n "$val" ] || continue
+        IFS=' ,' read -r -a vals <<< "$val"
+        for v in "${vals[@]}"; do
+            [ -n "$v" ] || continue
+            case "$key" in
+                *_HOST|*_URL)  h=$(url_host "$v"); entries+=("$h"); added+=("$h") ;;
+                *_PRIVATE_IP)  echo "$v" >> "$OUT/private-allow"; added+=("$v") ;;
+            esac
+        done
+    done < "$f"
+    [ ${#added[@]} -eq 0 ] || echo "Add-on $addon: allowing $(IFS=' '; echo "${added[*]}")"
+done
 
 : > "$OUT/domains.tmp"
 for e in "${entries[@]}"; do

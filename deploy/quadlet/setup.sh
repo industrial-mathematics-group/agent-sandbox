@@ -17,7 +17,8 @@
 #   --port N             publish/open a TCP port for dev servers (repeatable).
 #                        plain: published on 127.0.0.1:N of the host; tailscale: open on the tailnet
 #   --gpu amd|nvidia     local GPU (amd switches to the -rocm image)
-#   --addon NAME         specific add-on: gpu-remote, slurm (repeatable)
+#   --addon NAME         specific add-on: gpu-remote, slurm, git-remote, notify (repeatable).
+#                        Its hosts are allowlisted in the gateway automatically.
 #   --memory SIZE --cpus N   container limits (default: 16g, min(8, nproc))
 #   --registry REG       image registry (default: $AGENT_SANDBOX_REGISTRY or ghcr.io/OWNER;
 #                        use "localhost" for images built with ./build.sh)
@@ -49,7 +50,7 @@ SANDBOX_USER=agent-sandbox
 HOST_SETUP=1
 DRY=0
 
-usage() { sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'; }
 while [ $# -gt 0 ]; do
     case "$1" in
         --name)         NAME=$2; shift 2 ;;
@@ -79,7 +80,7 @@ case "$NET" in plain|tailscale) ;; *) die "--net must be plain or tailscale" ;; 
 case "$MODE" in standard|strict|open) ;; *) die "--mode must be standard, strict or open" ;; esac
 case "$GPU" in ""|amd|nvidia) ;; *) die "--gpu must be amd or nvidia" ;; esac
 for a in "${ADDONS[@]}"; do
-    case "$a" in gpu-remote|slurm) ;; *) die "unknown add-on $a (gpu-remote, slurm)" ;; esac
+    case "$a" in gpu-remote|slurm|git-remote|notify) ;; *) die "unknown add-on $a (gpu-remote, slurm, git-remote, notify)" ;; esac
 done
 for p in "${PORTS[@]}"; do [[ "$p" =~ ^[0-9]{1,5}$ ]] || die "bad port $p"; done
 [ "$REGISTRY" != ghcr.io/OWNER ] || die "set --registry (or AGENT_SANDBOX_REGISTRY), e.g. ghcr.io/<owner> or localhost"
@@ -236,20 +237,38 @@ if [ "$NET" = tailscale ]; then
     install_file 644 "$TMP/10-tailscale.conf" "$UNIT_DIR/$NAME-gateway.container.d/10-tailscale.conf"
 fi
 
+ssh_addon() { case "$1" in gpu-remote|slurm) return 0 ;; *) return 1 ;; esac; }
 dropins=()
 [ -n "$GPU" ] && dropins+=("$REPO/addons/gpu-local/quadlet/10-gpu-$GPU.conf")
 for a in "${ADDONS[@]}"; do
     case "$a" in
         gpu-remote) dropins+=("$REPO/addons/gpu-remote/quadlet/30-gpu-remote.conf") ;;
         slurm)      dropins+=("$REPO/addons/slurm/quadlet/31-slurm.conf") ;;
+        git-remote) dropins+=("$REPO/addons/git-remote/quadlet/32-git-remote.conf") ;;
+        notify)     dropins+=("$REPO/addons/notify/quadlet/33-notify.conf") ;;
     esac
-    # The add-on's client + claude.md, mounted read-only into the agent
-    make_dir "$ADDON_DIR" "$ADDON_DIR/$a" "$ADDON_DIR/$a/bin" "$CONFIG_DIR/${a%%-*}-ssh"
+    # The add-on's client, claude.md and start-up hooks, mounted read-only into the agent
+    make_dir "$ADDON_DIR" "$ADDON_DIR/$a" "$ADDON_DIR/$a/bin"
+    ssh_addon "$a" && make_dir "$CONFIG_DIR/${a%%-*}-ssh"
     for f in "$REPO/addons/$a/bin/"*; do install_file 755 "$f" "$ADDON_DIR/$a/bin/$(basename "$f")"; done
     install_file 644 "$REPO/addons/$a/claude.md" "$ADDON_DIR/$a/claude.md"
+    if [ -d "$REPO/addons/$a/entrypoint.d" ]; then
+        make_dir "$ADDON_DIR/$a/entrypoint.d"
+        for f in "$REPO/addons/$a/entrypoint.d/"*.sh; do install_file 644 "$f" "$ADDON_DIR/$a/entrypoint.d/$(basename "$f")"; done
+    fi
     env=$CONFIG_DIR/$a.env
     if exists "$env"; then echo "   keeping $env"; else install_file 600 "$REPO/addons/$a/$a.env.example" "$env"; fi
 done
+# Gateway side of each add-on: it reads the add-on's env file and allowlists its
+# hosts (*_HOST, *_URL) and private addresses (*_PRIVATE_IP).
+if [ ${#ADDONS[@]} -gt 0 ]; then
+    make_dir "$UNIT_DIR/$NAME-gateway.container.d"
+    for a in "${ADDONS[@]}"; do
+        render "$HERE/addon-gateway.conf" "$TMP/50-addon-$a.conf"
+        sed -i "s/@ADDON@/$a/g" "$TMP/50-addon-$a.conf"
+        install_file 644 "$TMP/50-addon-$a.conf" "$UNIT_DIR/$NAME-gateway.container.d/50-addon-$a.conf"
+    done
+fi
 if [ ${#dropins[@]} -gt 0 ]; then
     make_dir "$UNIT_DIR/$NAME.container.d"
     for f in "${dropins[@]}"; do
@@ -280,7 +299,10 @@ Done. Next steps, as $SANDBOX_USER:
 $( [ "$SAME_USER" = 0 ] && echo "  sudo machinectl shell $SANDBOX_USER@" )
   nano ${CONFIG_DIR/#$SB_HOME/\~}/gateway.env       # mode, profiles$( [ "$NET" = tailscale ] && echo ', TS_AUTHKEY, TS_EXIT_NODE' )
   nano ${CONFIG_DIR/#$SB_HOME/\~}/extra.list        # your own allowed hosts
-$( for a in "${ADDONS[@]}"; do echo "  nano ${CONFIG_DIR/#$SB_HOME/\~}/$a.env   # + SSH key in ${CONFIG_DIR/#$SB_HOME/\~}/${a%%-*}-ssh/ (addons/$a/README.md)"; done )
+$( for a in "${ADDONS[@]}"; do
+       if ssh_addon "$a"; then echo "  nano ${CONFIG_DIR/#$SB_HOME/\~}/$a.env   # + SSH key in ${CONFIG_DIR/#$SB_HOME/\~}/${a%%-*}-ssh/ (addons/$a/README.md)"
+       else echo "  nano ${CONFIG_DIR/#$SB_HOME/\~}/$a.env   # host, token (addons/$a/README.md)"; fi
+     done )
 $( case "$IMAGE" in localhost/*) ;; *) echo "  podman login --authfile ~/.config/containers/auth.json ${IMAGE%%/*}   # private packages: once";; esac )
   /usr/libexec/podman/quadlet -dryrun -user | less   # check the generated units
   systemctl --user daemon-reload
