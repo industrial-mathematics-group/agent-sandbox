@@ -9,13 +9,28 @@
 set -euo pipefail
 
 out=${1:-/etc/claude-code/CLAUDE.md}
+# Add-on mounts belong to the host user (= agent) and are usually mode 0700; the
+# entrypoint's root has no CAP_DAC_OVERRIDE, so it reads them as agent.
+read_addon() {
+    cat "$1" 2>/dev/null && return 0
+    [ "$(id -u)" = 0 ] && id agent >/dev/null 2>&1 || return 1
+    setpriv --reuid=agent --regid=agent --init-groups --inh-caps=-all -- cat "$1" 2>/dev/null
+}
+
 tmp=$(mktemp)
 {
     first=1
-    for f in /usr/share/agent-sandbox/claude-md/*.md /opt/agent-sandbox/addons/*/claude.md; do
+    for f in /usr/share/agent-sandbox/claude-md/*.md; do
         [ -r "$f" ] || continue
         [ "$first" = 1 ] || printf '\n'
         cat "$f"
+        first=0
+    done
+    for d in /opt/agent-sandbox/addons/*/; do
+        [ -d "$d" ] || continue
+        frag=$(read_addon "${d}claude.md") || continue
+        [ "$first" = 1 ] || printf '\n'
+        printf '%s\n' "$frag"
         first=0
     done
 } > "$tmp"
