@@ -82,12 +82,21 @@ drop_to_agent() {
 }
 
 # ---------------------------------------------------------------------------
-# 2. Add-ons mounted under /opt/agent-sandbox/addons/<name>/ (bin/, claude.md)
+# 2. Add-ons mounted under /opt/agent-sandbox/addons/<name>/ (bin/, claude.md).
+#    Their commands are linked into /opt/agent-sandbox/bin, which is on the
+#    image PATH: a PATH set here would reach only this process, not the shells
+#    and `claude` sessions started later with `podman exec` / `docker exec`.
 # ---------------------------------------------------------------------------
-for d in /opt/agent-sandbox/addons/*/bin; do
-    [ -d "$d" ] && PATH="$d:$PATH"
+install -d -m 0755 /opt/agent-sandbox/bin
+find /opt/agent-sandbox/bin -mindepth 1 -maxdepth 1 -type l -delete
+for f in /opt/agent-sandbox/addons/*/bin/*; do
+    [ -f "$f" ] && [ -x "$f" ] || continue
+    ln -sfn "$f" "/opt/agent-sandbox/bin/${f##*/}"
 done
-export PATH
+if compgen -G '/opt/agent-sandbox/addons/*' >/dev/null && ! compgen -G '/opt/agent-sandbox/bin/*' >/dev/null; then
+    echo "WARN: add-ons are mounted under /opt/agent-sandbox/addons but no command in their bin/" \
+         "is readable (SELinux host: keep the :z label on the add-on volume)." >&2
+fi
 
 # ---------------------------------------------------------------------------
 # 3. Layer hooks (e.g. Xvfb from layers/xvfb). Sourced as root; they start
