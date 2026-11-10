@@ -31,7 +31,8 @@ files next to `deploy/compose/compose.yaml` (`slurm-ssh/`, `slurm.env`).
    `~/.ssh/authorized_keys`.
 3. Enable the add-on: `setup.sh … --addon slurm` (Quadlet) or
    `-f ../../addons/slurm/compose.yaml` (Compose). Fill in `slurm.env` (`SLURM_HOST`,
-   `SLURM_USER`), add `SLURM_HOST` to the gateway's `extra.list`, restart.
+   `SLURM_USER`) and restart. The gateway allowlists `SLURM_HOST` by itself (set
+   `SLURM_PRIVATE_IP` too if the login node has a private address).
 
 ## Use (inside the sandbox)
 

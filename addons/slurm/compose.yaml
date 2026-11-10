@@ -2,6 +2,10 @@
 #   docker compose -f compose.yaml -f ../../addons/slurm/compose.yaml up -d
 # Paths are relative to deploy/compose (the first compose file's folder).
 services:
+  gateway:
+    volumes:
+      # allowlists SLURM_HOST (and SLURM_PRIVATE_IP)
+      - ${SLURM_ENV:-./slurm.env}:/etc/agent-sandbox/addons/slurm.env:ro
   agent:
     volumes:
       - ../../addons/slurm:/opt/agent-sandbox/addons/slurm:ro

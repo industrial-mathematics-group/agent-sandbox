@@ -1,0 +1,14 @@
+# git-remote add-on:
+#   docker compose -f compose.yaml -f ../../addons/git-remote/compose.yaml up -d
+# Paths are relative to deploy/compose (the first compose file's folder).
+# git-remote.env must be readable by uid 1000 inside the agent (your user with
+# compose.podman.yaml; otherwise chown 1000 or chmod 644 it).
+services:
+  gateway:
+    volumes:
+      # allowlists GIT_REMOTE_HOST, lets GIT_REMOTE_PRIVATE_IP through
+      - ${GIT_REMOTE_ENV:-./git-remote.env}:/etc/agent-sandbox/addons/git-remote.env:ro
+  agent:
+    volumes:
+      - ../../addons/git-remote:/opt/agent-sandbox/addons/git-remote:ro
+      - ${GIT_REMOTE_ENV:-./git-remote.env}:/run/agent-sandbox/addons/git-remote.env:ro

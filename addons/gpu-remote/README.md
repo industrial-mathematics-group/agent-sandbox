@@ -38,11 +38,12 @@ Paths below are for the Quadlet setup with instance name `agent`
    node's public IP, for example), the key only works from there (`from="…"`).
 3. Enable the add-on: `setup.sh … --addon gpu-remote` (Quadlet) or add
    `-f ../../addons/gpu-remote/compose.yaml` (Compose). Fill in `gpu-remote.env`
-   (`GPU_HOST`, `GPU_USER`, `GPU_PROJECT`), add `GPU_HOST` to the gateway's `extra.list`,
-   then restart.
+   (`GPU_HOST`, `GPU_USER`, `GPU_PROJECT`), then restart. The gateway allowlists
+   `GPU_HOST` by itself; if the server is on your LAN or tailnet, also set
+   `GPU_PRIVATE_IP` to its address.
 
 SSH goes through the gateway proxy (CONNECT to port 22), so the host must be on the
-allowlist like any other.
+allowlist like any other; the add-on's gateway mount takes care of that.
 
 ## Use (inside the sandbox)
 
