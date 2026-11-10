@@ -40,7 +40,7 @@ ENV LANG=en_US.UTF-8 \
     SHELL=/bin/zsh \
     EDITOR=nano \
     VISUAL=nano \
-    PATH=/home/agent/.local/bin:$PATH
+    PATH=/home/agent/.local/bin:/opt/agent-sandbox/bin:$PATH
 
 # SSH (git over ssh, the gpu/slurm add-ons) also goes through the proxy.
 RUN printf '%s\n' \
@@ -62,7 +62,7 @@ RUN git config --file /home/agent/.gitconfig core.pager delta \
 COPY --chmod=0755 entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY --chmod=0755 assemble-claude-md install-claude-code /usr/local/bin/
 RUN install -d -m 0755 /usr/local/lib/agent-sandbox/entrypoint.d \
-                       /usr/share/agent-sandbox/claude-md /opt/agent-sandbox/addons \
+                       /usr/share/agent-sandbox/claude-md /opt/agent-sandbox/addons /opt/agent-sandbox/bin \
                        /etc/claude-code
 COPY --chmod=0644 claude-md/ /usr/share/agent-sandbox/claude-md/
 
