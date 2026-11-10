@@ -91,9 +91,11 @@ export PATH
 
 # ---------------------------------------------------------------------------
 # 3. Layer hooks (e.g. Xvfb from layers/xvfb). Sourced as root; they start
-#    their own processes with drop_to_agent.
+#    their own processes with drop_to_agent. Add-ons can ship their own
+#    (/opt/agent-sandbox/addons/<name>/entrypoint.d/), e.g. git-remote writes
+#    /etc/gitconfig, notify installs Claude Code hooks.
 # ---------------------------------------------------------------------------
-for hook in /usr/local/lib/agent-sandbox/entrypoint.d/*.sh; do
+for hook in /usr/local/lib/agent-sandbox/entrypoint.d/*.sh /opt/agent-sandbox/addons/*/entrypoint.d/*.sh; do
     [ -r "$hook" ] || continue
     # shellcheck source=/dev/null
     . "$hook"

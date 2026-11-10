@@ -1,0 +1,14 @@
+# notify add-on:
+#   docker compose -f compose.yaml -f ../../addons/notify/compose.yaml up -d
+# Paths are relative to deploy/compose (the first compose file's folder).
+# notify.env must be readable by uid 1000 inside the agent (your user with
+# compose.podman.yaml; otherwise chown 1000 or chmod 644 it).
+services:
+  gateway:
+    volumes:
+      # allowlists NOTIFY_URL's host, lets NOTIFY_PRIVATE_IP through
+      - ${NOTIFY_ENV:-./notify.env}:/etc/agent-sandbox/addons/notify.env:ro
+  agent:
+    volumes:
+      - ../../addons/notify:/opt/agent-sandbox/addons/notify:ro
+      - ${NOTIFY_ENV:-./notify.env}:/run/agent-sandbox/addons/notify.env:ro

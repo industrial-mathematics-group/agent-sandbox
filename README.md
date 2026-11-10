@@ -14,8 +14,9 @@ Sandboxed containers for running Claude Code (and similar coding agents) with
   proxy, so the agent can't change the rules. Only allowlisted hosts get through; LAN,
   cloud metadata and IPv6 are blocked. Optionally all traffic leaves only through a
   Tailscale exit node.
-- **Add-ons** for local GPUs and for running jobs on a remote GPU server or a Slurm
-  cluster through restricted SSH gateways.
+- **Add-ons** for local GPUs, for running jobs on a remote GPU server or a Slurm
+  cluster through restricted SSH gateways, for a Git hosting account (push, pull, API
+  with a token) and for push notifications. Enabling one allowlists its hosts.
 - **Runs on** rootless Podman with Quadlet (systemd user services, recommended on
   Linux) or Docker / Podman Compose.
 
@@ -63,7 +64,7 @@ Gateway: `ghcr.io/OWNER/agent-sandbox-gateway:latest` (plain) and `:tailscale`.
 | general add-ons (image layers) | `layers/xvfb`, `layers/chromium`, `layers/rocm` | Virtual X display + Mesa · headless Chromium · ROCm runtime |
 | final step | `images/final` | Proxy settings, managed CLAUDE.md, mount point for Claude Code (last step of every image) |
 | gateway | `gateway` | Firewall, proxy, allowlists (`gateway/lists/*.list`) |
-| specific add-ons | `addons/gpu-local`, `addons/gpu-remote`, `addons/slurm` | Local GPU drop-ins · remote GPU gateway · Slurm gateway |
+| specific add-ons | `addons/gpu-local`, `addons/gpu-remote`, `addons/slurm`, `addons/git-remote`, `addons/notify` | Local GPU drop-ins · remote GPU gateway · Slurm gateway · Git hosting account · notifications |
 | deployment | `deploy/quadlet`, `deploy/compose` | Quadlet templates + `setup.sh` · Compose files |
 
 Each layer adds a fragment to the managed `/etc/claude-code/CLAUDE.md`, and so does each
@@ -178,7 +179,9 @@ your ACLs and keep everything else towards the sandbox denied.
 **Your own private services** (LAN, or tailnet hosts on `100.x`): private ranges are
 blocked even for allowlisted names. To reach one, allowlist its name and add its address to
 `GATEWAY_PRIVATE_ALLOW` in `gateway.env`, e.g. `GATEWAY_PRIVATE_ALLOW=100.85.46.4` (ports
-80/443/22, via `tailscale0` with Tailscale). Prefer single addresses over ranges.
+80/443/22, via `tailscale0` with Tailscale). Prefer single addresses over ranges. LAN hosts
+behind a subnet router also need `TS_EXTRA_ARGS=--accept-routes`. Add-ons do both for their
+own hosts (`*_PRIVATE_IP` in their env file, see [Add-ons](#add-ons)).
 
 **Corporate proxy:** `GATEWAY_UPSTREAM_PROXY=host:port` chains the gateway's proxy to it.
 
@@ -222,19 +225,31 @@ own chain in `build.sh`. Specific add-ons (`addons/`) are switched on per instan
 | [gpu-local](addons/gpu-local/README.md) | AMD (ROCm) or NVIDIA (CDI) GPU of this machine | `--gpu amd\|nvidia` / `compose.gpu-*.yaml` |
 | [gpu-remote](addons/gpu-remote/README.md) | Julia tests on a remote GPU server, via a forced-command SSH gateway + bubblewrap | `--addon gpu-remote` / `addons/gpu-remote/compose.yaml` |
 | [slurm](addons/slurm/README.md) | Jobs on an HPC cluster with capped resources, via a forced-command SSH gateway | `--addon slurm` / `addons/slurm/compose.yaml` |
+| [git-remote](addons/git-remote/README.md) | One GitHub / Forgejo / GitLab account: host, service and token; git push/pull over HTTPS and API calls | `--addon git-remote` / `addons/git-remote/compose.yaml` |
+| [notify](addons/notify/README.md) | Push notifications (ntfy, Gotify, Discord, Slack, webhook) when Claude needs you, plus a `notify` command | `--addon notify` / `addons/notify/compose.yaml` |
 
-A specific add-on mounts its client (`bin/`) and its `claude.md` read-only into
-`/opt/agent-sandbox/addons/<name>/`; the entrypoint adds it to `PATH` and to the
-managed CLAUDE.md. Remove the drop-in (Quadlet) or the `-f` file (Compose) to turn it
-off.
+A specific add-on mounts its client (`bin/`), its `claude.md` and optional start-up hooks
+(`entrypoint.d/`) read-only into `/opt/agent-sandbox/addons/<name>/`; the entrypoint adds
+it to `PATH` and to the managed CLAUDE.md and runs the hooks. Its settings live in
+`<name>.env` next to `gateway.env`.
+
+**Firewall:** the add-on's env file is also mounted into the gateway
+(`/etc/agent-sandbox/addons/<addon>.env`). At start the gateway allowlists the host of
+every `*_HOST` and `*_URL` value in it and lets every `*_PRIVATE_IP` address through the
+private-range block, like `GATEWAY_PRIVATE_ALLOW`. The file is parsed, not executed, and
+other keys (tokens) are ignored. The gateway log lists what each add-on added.
+
+Remove the drop-ins (Quadlet: `<name>.container.d/3x-<addon>.conf` and
+`<name>-gateway.container.d/50-addon-<addon>.conf`) or the `-f` file (Compose) to turn an
+add-on off.
 
 ## Common tasks
 
 - **Add hosts:** `extra.list` (one per line) or `GATEWAY_EXTRA_DOMAINS`, then restart the
   gateway.
-- **Git push:** no credentials are in the container on purpose. Commit inside, push from
-  the host. If you want the agent to push, use a fine-grained token or deploy key scoped
-  to that single repo.
+- **Git push:** no credentials are in the container by default. Commit inside, push from
+  the host, or enable the [git-remote](addons/git-remote/README.md) add-on with a
+  fine-grained token scoped to the repositories the agent should push to.
 - **Update:** images: Quadlet automatically via `podman-auto-update.timer` (`podman
   auto-update` by hand), Compose `docker compose pull && docker compose up -d`. Claude
   Code: restart the container (a channel is re-checked after a day; delete
@@ -286,7 +301,7 @@ Start with the gateway log (`journalctl --user -u <name>-gateway -e` or
 - Opened inbound ports are reachable by every device your ACLs (or localhost users)
   allow. Dev servers, Bonito and ocp_vscode have no authentication.
 - Anything in the agent's environment (`sandbox.env`, e.g. `ANTHROPIC_API_KEY`) is
-  readable by the agent.
+  readable by the agent, and so are the tokens of the git-remote and notify add-ons.
 
 ## License
 
