@@ -1,0 +1,100 @@
+#!/bin/bash
+# notify: send a push notification (notify add-on).
+#
+#   notify [-t TITLE] [-p low|default|high] MESSAGE...
+#   notify --hook        Claude Code hook: reads the hook's JSON from stdin
+#   notify --test        send a test message
+#
+# Services (NOTIFY_SERVICE): ntfy, gotify, discord, slack, webhook. Settings come from
+# the mounted env file (NOTIFY_ENV_FILE, default /run/agent-sandbox/addons/notify.env),
+# parsed, not sourced.
+set -euo pipefail
+
+ENV_FILE=${NOTIFY_ENV_FILE:-/run/agent-sandbox/addons/notify.env}
+usage() { sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; }
+die() { echo "notify: $*" >&2; exit 1; }
+
+NOTIFY_SERVICE= NOTIFY_URL= NOTIFY_TOKEN= NOTIFY_TITLE=
+[ -r "$ENV_FILE" ] || die "no settings ($ENV_FILE not readable); is the add-on configured?"
+while IFS= read -r line || [ -n "$line" ]; do
+    [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?(NOTIFY_[A-Z_]+)=(.*)$ ]] || continue
+    val=${BASH_REMATCH[3]}
+    val=${val%%[[:space:]]#*}; val=${val%"${val##*[![:space:]]}"}
+    val=${val#[\"\']}; val=${val%[\"\']}
+    case "${BASH_REMATCH[2]}" in
+        NOTIFY_SERVICE|NOTIFY_URL|NOTIFY_TOKEN|NOTIFY_TITLE) printf -v "${BASH_REMATCH[2]}" '%s' "$val" ;;
+    esac
+done < "$ENV_FILE"
+SERVICE=${NOTIFY_SERVICE,,}
+URL=${NOTIFY_URL%/}
+[[ "$URL" =~ ^https?://[^/[:space:]]+ ]] || die "NOTIFY_URL must be an http(s) URL (got '$NOTIFY_URL')"
+
+title="" priority=default hook=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -t|--title)    title=${2:?-t needs a title}; shift 2 ;;
+        -p|--priority) priority=${2:?-p needs low, default or high}; shift 2 ;;
+        --hook)        hook=1; shift ;;
+        --test)        title="agent-sandbox"; set -- "Test notification from the notify add-on"; break ;;
+        -h|--help)     usage; exit 0 ;;
+        --)            shift; break ;;
+        -*)            usage >&2; exit 2 ;;
+        *)             break ;;
+    esac
+done
+case "$priority" in low|default|high) ;; *) die "priority must be low, default or high" ;; esac
+
+if [ "$hook" = 1 ]; then
+    # A hook must never get in Claude's way: any failure below ends quietly.
+    trap 'exit 0' EXIT
+    exec 2>/dev/null
+    input=$(cat)
+    event=$(jq -r '.hook_event_name // empty' <<< "$input" 2>/dev/null || true)
+    cwd=$(jq -r '.cwd // empty' <<< "$input" 2>/dev/null || true)
+    case "$event" in
+        Notification) message=$(jq -r '.message // "Claude needs your attention"' <<< "$input" 2>/dev/null || echo "Claude needs your attention")
+                      priority=high ;;
+        Stop)         message="Claude finished and is waiting for you" ;;
+        *)            exit 0 ;;
+    esac
+    title="${NOTIFY_TITLE:-Claude Code}${cwd:+ - $(basename "$cwd")}"
+else
+    [ $# -gt 0 ] || { usage >&2; exit 2; }
+    message="$*"
+    title=${title:-${NOTIFY_TITLE:-Claude Code}}
+fi
+
+# The token goes to curl through a file descriptor, not the command line (ps).
+send() {   # send <url> <json> [header line]
+    curl -sS --fail-with-body -o /dev/null --max-time 15 -X POST \
+        -H 'Content-Type: application/json' -H @<(printf '%s\n' "${3:-X-Agent-Sandbox: 1}") \
+        --data-binary "$2" "$1"
+}
+bearer() { [ -n "$NOTIFY_TOKEN" ] && printf 'Authorization: Bearer %s' "$NOTIFY_TOKEN" || true; }
+
+case "$SERVICE" in
+    ntfy)
+        # JSON publishing to the server root keeps UTF-8 titles intact
+        topic=${URL##*/} server=${URL%/*}
+        [[ "$server" =~ ^https?://[^/]+ ]] && [ -n "$topic" ] || die "NOTIFY_URL must be https://server/topic"
+        case "$priority" in low) p=2 ;; default) p=3 ;; high) p=4 ;; esac
+        json=$(jq -nc --arg t "$topic" --arg ti "$title" --arg m "$message" --argjson p "$p" \
+            '{topic:$t, title:$ti, message:$m, priority:$p}')
+        send "$server" "$json" "$(bearer)" ;;
+    gotify)
+        [ -n "$NOTIFY_TOKEN" ] || die "gotify needs NOTIFY_TOKEN (an application token)"
+        case "$priority" in low) p=2 ;; default) p=5 ;; high) p=8 ;; esac
+        json=$(jq -nc --arg ti "$title" --arg m "$message" --argjson p "$p" '{title:$ti, message:$m, priority:$p}')
+        send "$URL/message" "$json" "X-Gotify-Key: $NOTIFY_TOKEN" ;;
+    discord)
+        json=$(jq -nc --arg c "**$title**"$'\n'"$message" '{content:$c}')
+        send "$URL" "$json" ;;
+    slack)
+        json=$(jq -nc --arg c "*$title*"$'\n'"$message" '{text:$c}')
+        send "$URL" "$json" ;;
+    webhook)
+        json=$(jq -nc --arg ti "$title" --arg m "$message" --arg p "$priority" '{title:$ti, message:$m, priority:$p}')
+        send "$URL" "$json" "$(bearer)" ;;
+    *)
+        die "NOTIFY_SERVICE must be ntfy, gotify, discord, slack or webhook (got '$NOTIFY_SERVICE')" ;;
+esac

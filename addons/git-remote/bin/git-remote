@@ -1,0 +1,106 @@
+#!/bin/bash
+# git-remote: the sandbox's Git hosting account (git-remote add-on).
+#
+#   git-remote info                       host, service, account, API base (never the token)
+#   git-remote url OWNER/REPO             HTTPS clone URL
+#   git-remote clone OWNER/REPO [DIR]     git clone over HTTPS
+#   git-remote api METHOD PATH [JSON|@FILE]   authenticated API call, PATH relative to the API base
+#   git-remote gh ARGS...                 GitHub only: run gh with the token
+#   git-remote credential get             git credential helper (set up in /etc/gitconfig)
+#
+# Settings come from the mounted env file (GIT_REMOTE_ENV_FILE, default
+# /run/agent-sandbox/addons/git-remote.env). It is parsed, not sourced.
+set -euo pipefail
+
+ENV_FILE=${GIT_REMOTE_ENV_FILE:-/run/agent-sandbox/addons/git-remote.env}
+usage() { sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; }
+die() { echo "git-remote: $*" >&2; exit 1; }
+
+GIT_REMOTE_SERVICE= GIT_REMOTE_HOST= GIT_REMOTE_TOKEN= GIT_REMOTE_USER= GIT_REMOTE_API_URL=
+[ -r "$ENV_FILE" ] || die "no settings ($ENV_FILE not readable); is the add-on configured?"
+while IFS= read -r line || [ -n "$line" ]; do
+    [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?(GIT_REMOTE_[A-Z_]+)=(.*)$ ]] || continue
+    val=${BASH_REMATCH[3]}
+    val=${val%%[[:space:]]#*}; val=${val%"${val##*[![:space:]]}"}
+    val=${val#[\"\']}; val=${val%[\"\']}
+    case "${BASH_REMATCH[2]}" in
+        GIT_REMOTE_SERVICE|GIT_REMOTE_HOST|GIT_REMOTE_TOKEN|GIT_REMOTE_USER|GIT_REMOTE_API_URL)
+            printf -v "${BASH_REMATCH[2]}" '%s' "$val" ;;
+    esac
+done < "$ENV_FILE"
+
+SERVICE=${GIT_REMOTE_SERVICE,,}
+HOST=${GIT_REMOTE_HOST,,}
+[[ "$HOST" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$ ]] \
+    || die "GIT_REMOTE_HOST must be a host name (got '$GIT_REMOTE_HOST')"
+case "$SERVICE" in
+    github)       USERNAME=${GIT_REMOTE_USER:-x-access-token}
+                  if [ "$HOST" = github.com ]; then API=https://api.github.com; else API=https://$HOST/api/v3; fi ;;
+    forgejo|gitea) USERNAME=$GIT_REMOTE_USER; API=https://$HOST/api/v1 ;;
+    gitlab)       USERNAME=${GIT_REMOTE_USER:-oauth2}; API=https://$HOST/api/v4 ;;
+    *) die "GIT_REMOTE_SERVICE must be github, forgejo or gitlab (got '$GIT_REMOTE_SERVICE')" ;;
+esac
+API=${GIT_REMOTE_API_URL:-$API}; API=${API%/}
+
+need_token() { [ -n "$GIT_REMOTE_TOKEN" ] || die "GIT_REMOTE_TOKEN is empty"; }
+# The token goes to curl through a file descriptor, not the command line (ps).
+auth_header() {
+    case "$SERVICE" in
+        github)        printf 'Authorization: Bearer %s\nAccept: application/vnd.github+json\n' "$GIT_REMOTE_TOKEN" ;;
+        forgejo|gitea) printf 'Authorization: token %s\n' "$GIT_REMOTE_TOKEN" ;;
+        gitlab)        printf 'PRIVATE-TOKEN: %s\n' "$GIT_REMOTE_TOKEN" ;;
+    esac
+}
+repo_arg() {
+    [[ "${1:-}" =~ ^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)+$ ]] || die "expected OWNER/REPO, got '${1:-}'"
+    printf 'https://%s/%s.git' "$HOST" "${1%.git}"
+}
+
+cmd=${1:-}; [ $# -gt 0 ] && shift
+case "$cmd" in
+    info)
+        echo "service: $SERVICE"
+        echo "host:    $HOST"
+        echo "account: ${USERNAME:-(GIT_REMOTE_USER not set)}"
+        echo "api:     $API"
+        echo "token:   $([ -n "$GIT_REMOTE_TOKEN" ] && echo set || echo MISSING)"
+        ;;
+    url)
+        repo_arg "${1:-}"; echo ;;
+    clone)
+        url=$(repo_arg "${1:-}"); shift
+        exec git clone "$url" "$@" ;;
+    api)
+        need_token
+        method=${1:?usage: git-remote api METHOD PATH [JSON|@FILE]} path=${2:?usage: git-remote api METHOD PATH [JSON|@FILE]}
+        [[ "$method" =~ ^(GET|POST|PUT|PATCH|DELETE|HEAD)$ ]] || die "unknown method '$method'"
+        [[ "$path" == /* ]] || path=/$path
+        data=()
+        if [ $# -ge 3 ]; then data=(-H 'Content-Type: application/json' --data-binary "$3"); fi
+        curl -sS --fail-with-body -X "$method" -H @<(auth_header) "${data[@]}" "$API$path"
+        ;;
+    gh)
+        [ "$SERVICE" = github ] || die "gh only works with GIT_REMOTE_SERVICE=github"
+        need_token
+        if [ "$HOST" = github.com ]; then export GH_TOKEN=$GIT_REMOTE_TOKEN
+        else export GH_HOST=$HOST GH_ENTERPRISE_TOKEN=$GIT_REMOTE_TOKEN; fi
+        exec gh "$@" ;;
+    credential)
+        # git credential helper protocol: answer "get" for our host only
+        [ "${1:-}" = get ] || exit 0
+        protocol= host=
+        while IFS= read -r line && [ -n "$line" ]; do
+            case "$line" in
+                protocol=*) protocol=${line#protocol=} ;;
+                host=*)     host=${line#host=} ;;
+            esac
+        done
+        [ "$protocol" = https ] && [ "${host,,}" = "$HOST" ] || exit 0
+        [ -n "$GIT_REMOTE_TOKEN" ] && [ -n "$USERNAME" ] || exit 0
+        printf 'username=%s\npassword=%s\n' "$USERNAME" "$GIT_REMOTE_TOKEN"
+        ;;
+    ""|-h|--help|help)
+        usage ;;
+    *)
+        usage >&2; exit 2 ;;
+esac

@@ -135,12 +135,17 @@ iptables -A OUTPUT -o lo -j ACCEPT
 # hostname allowlist still applies, so the host must be allowlisted as well. Name
 # single addresses where you can: a wide range lets every allowlisted name that
 # resolves into it through, including ones whose DNS someone else controls.
+# Add-ons add theirs (*_PRIVATE_IP in their env files, collected by render-config.sh).
 IFS=' ,' read -r -a private_allow <<< "${GATEWAY_PRIVATE_ALLOW:-}"
+if [ -s /run/agent-gateway/private-allow ]; then
+    while read -r c; do private_allow+=("$c"); done < /run/agent-gateway/private-allow
+fi
 private_ok=()
 for c in "${private_allow[@]}"; do
     [ -n "$c" ] || continue
-    is_ipv4_net "$c" || { echo "ERROR: GATEWAY_PRIVATE_ALLOW: '$c' is not an IPv4 address/network" >&2; exit 1; }
-    private_ok+=("$c")
+    is_ipv4_net "$c" || { echo "ERROR: GATEWAY_PRIVATE_ALLOW / add-on *_PRIVATE_IP: '$c' is not an IPv4 address/network" >&2; exit 1; }
+    dup=0; for o in "${private_ok[@]}"; do [ "$o" != "$c" ] || dup=1; done
+    [ "$dup" = 1 ] || private_ok+=("$c")
 done
 [ ${#private_ok[@]} -eq 0 ] || echo "Private addresses allowed: $(IFS=" "; echo "${private_ok[*]}")"
 

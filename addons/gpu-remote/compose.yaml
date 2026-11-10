@@ -2,6 +2,10 @@
 #   docker compose -f compose.yaml -f ../../addons/gpu-remote/compose.yaml up -d
 # Paths are relative to deploy/compose (the first compose file's folder).
 services:
+  gateway:
+    volumes:
+      # allowlists GPU_HOST (and GPU_PRIVATE_IP)
+      - ${GPU_REMOTE_ENV:-./gpu-remote.env}:/etc/agent-sandbox/addons/gpu-remote.env:ro
   agent:
     volumes:
       - ../../addons/gpu-remote:/opt/agent-sandbox/addons/gpu-remote:ro
