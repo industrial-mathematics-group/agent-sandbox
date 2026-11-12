@@ -8,7 +8,8 @@
 #   ./build.sh --engine buildah node   # daemonless (CI runners without Docker)
 #
 # Every flavor is a chain: images/base -> its layers -> images/final.
-# Claude Code is not part of any image: the entrypoint installs it at start.
+# No coding agent is part of any image: the claude-code and codex add-ons install
+# them at container start.
 # Each step is a normal `podman/docker build` with --build-arg BASE=<previous
 # step>, so there is nothing engine-specific. Shared prefixes (base, base+python …)
 # are built once per run and come from the build cache after that.
@@ -19,7 +20,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-# flavor -> layers between base and the Claude Code step
+# flavor -> layers between base and the final step
 declare -A CHAIN=(
     [minimal]=""
     [node]="images/node"

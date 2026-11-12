@@ -1,33 +1,19 @@
-# Final step of every image: runtime proxy settings, Claude Code wiring and the
-# default managed CLAUDE.md on top of a language/layer chain.
+# Final step of every image: runtime proxy settings and the default environment
+# notes (AGENTS.md) on top of a language/layer chain.
 #
-# Claude Code itself is NOT in the image. The entrypoint installs it at container
-# start (as root, before dropping to `agent`) into /opt/claude-code, which is meant
-# to be a named volume: root-owned, so the agent can't replace its own binary, and
-# shared between sandboxes so it is downloaded once per version. See
-# images/base/install-claude-code.
+# No coding agent is in the image. Claude Code and Codex are add-ons
+# (addons/claude-code, addons/codex): their entrypoint hooks install the CLI at
+# container start into a root-owned named volume.
 ARG BASE=localhost/agent-sandbox-stage:base
 FROM ${BASE}
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 USER root
 
-# /usr/local/bin/claude -> the version the entrypoint installed
-RUN install -d -m 0755 /opt/claude-code /opt/claude-code/bin \
- && ln -sf /opt/claude-code/bin/claude /usr/local/bin/claude
-
-# CLAUDE_CODE_VERSION: "stable" (default), "latest" or an exact version such as
-# 2.1.30. A channel is re-checked at most once a day; an exact version is only
-# downloaded when it isn't in the volume yet.
-ENV CLAUDE_CODE_VERSION=stable \
-    DISABLE_AUTOUPDATER=1 \
-    CLAUDE_CONFIG_DIR=/home/agent/.claude \
-    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
-
-# Default managed CLAUDE.md (regenerated at start to include mounted add-ons).
-RUN /usr/local/bin/assemble-claude-md \
- && runuser -u agent -- test -r /etc/claude-code/CLAUDE.md \
- && runuser -u agent -- test ! -w /etc/claude-code/CLAUDE.md
+# Default environment notes (regenerated at start to include mounted add-ons).
+RUN /usr/local/bin/assemble-agent-md \
+ && runuser -u agent -- test -r /etc/agent-sandbox/AGENTS.md \
+ && runuser -u agent -- test ! -w /etc/agent-sandbox/AGENTS.md
 
 # Runtime network: the gateway runs a filtering HTTP(S) proxy on 127.0.0.1:3128
 # inside the shared network namespace. Direct connections are blocked, so every

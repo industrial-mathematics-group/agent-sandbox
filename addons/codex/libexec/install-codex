@@ -1,0 +1,91 @@
+#!/bin/bash
+# Installs the OpenAI Codex CLI into /opt/codex at container start (codex add-on).
+# Run by the add-on's entrypoint hook as root, before the entrypoint drops to
+# `agent`, so the result is root-owned and read-only for the agent.
+#
+# Takes the native binary from the platform package of @openai/codex on the npm
+# registry (what `npm i -g @openai/codex` installs, minus its Node launcher), so it
+# works in every flavor, not only those with Node. The tarball is checked against
+# the registry's sha512 integrity. Downloads go through the gateway proxy
+# (registry.npmjs.org comes from codex.env).
+#
+#   CODEX_VERSION  "latest" (default) or an exact version such as 0.167.2
+#
+# Layout (meant to be a named volume shared by all sandboxes on the host):
+#   /opt/codex/versions/<version>/bin/codex     (+ codex-path/, codex-resources/)
+#   /opt/codex/bin/codex -> ../versions/<version>/bin/codex
+#   /opt/codex/.checked-latest                  last time "latest" was resolved
+set -euo pipefail
+
+DIR=${CODEX_DIR:-/opt/codex}   # override only for tests
+WANT=${CODEX_VERSION:-latest}
+MAX_AGE_MIN=${CODEX_CHECK_MINUTES:-1440}
+REGISTRY=https://registry.npmjs.org/@openai/codex
+
+[[ "$WANT" =~ ^(latest|[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?)$ ]] \
+    || { echo "install-codex: invalid CODEX_VERSION '$WANT'" >&2; exit 2; }
+case "$(uname -m)" in
+    x86_64)        plat=linux-x64   triple=x86_64-unknown-linux-musl ;;
+    aarch64|arm64) plat=linux-arm64 triple=aarch64-unknown-linux-musl ;;
+    *) echo "install-codex: unsupported architecture $(uname -m)" >&2; exit 1 ;;
+esac
+
+install -d -m 0755 "$DIR" "$DIR/bin" "$DIR/versions"
+# Several sandboxes may share the volume and start at the same time
+exec 9>"$DIR/.lock"
+flock -w 300 9
+
+current() { [ -x "$DIR/bin/codex" ] && "$DIR/bin/codex" --version 2>/dev/null | awk '{print $NF; exit}'; }
+use() { ln -sfn "../versions/$1/bin/codex" "$DIR/bin/codex"; }
+
+if [ "$WANT" = latest ]; then
+    stamp=$DIR/.checked-latest
+    if [ -x "$DIR/bin/codex" ] && [ -n "$(find "$stamp" -mmin -"$MAX_AGE_MIN" 2>/dev/null)" ]; then
+        exit 0
+    fi
+    ver=$(curl -fsSL --retry 3 "$REGISTRY/latest" | jq -r '.version // empty')
+    [[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]] || { echo "install-codex: could not resolve the latest version" >&2; exit 1; }
+else
+    ver=$WANT
+fi
+if [ -x "$DIR/versions/$ver/bin/codex" ]; then
+    use "$ver"
+    [ "$WANT" != latest ] || touch "$DIR/.checked-latest"
+    exit 0
+fi
+
+prev=$(current || true)
+echo "Installing Codex $ver ..."
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+meta=$(curl -fsSL --retry 3 "$REGISTRY/$ver-$plat") \
+    || { echo "install-codex: no package $ver-$plat on the npm registry" >&2; exit 1; }
+url=$(jq -r '.dist.tarball // empty' <<< "$meta")
+integrity=$(jq -r '.dist.integrity // empty' <<< "$meta")
+[[ "$url" == https://registry.npmjs.org/* ]] || { echo "install-codex: unexpected tarball URL '$url'" >&2; exit 1; }
+[[ "$integrity" == sha512-* ]] || { echo "install-codex: no sha512 integrity for $ver-$plat" >&2; exit 1; }
+curl -fsSL --retry 3 "$url" -o "$tmp/codex.tgz"
+want_sum=$(printf '%s' "${integrity#sha512-}" | base64 -d | od -An -v -tx1 | tr -d ' \n')
+have_sum=$(sha512sum "$tmp/codex.tgz" | awk '{print $1}')
+[ "$want_sum" = "$have_sum" ] || { echo "install-codex: checksum mismatch for $url" >&2; exit 1; }
+
+install -d -m 0755 "$tmp/x"
+tar -xzf "$tmp/codex.tgz" -C "$tmp/x" --no-same-owner --strip-components=3 "package/vendor/$triple"
+[ -x "$tmp/x/bin/codex" ] || { echo "install-codex: package has no vendor/$triple/bin/codex" >&2; exit 1; }
+got=$("$tmp/x/bin/codex" --version | awk '{print $NF; exit}')
+[ "$got" = "$ver" ] || { echo "install-codex: expected version $ver, binary says '$got'" >&2; exit 1; }
+
+rm -rf "${DIR:?}/versions/$ver.new"
+mv "$tmp/x" "$DIR/versions/$ver.new"
+chmod -R u=rwX,go=rX "$DIR/versions/$ver.new"
+rm -rf "${DIR:?}/versions/$ver"
+mv "$DIR/versions/$ver.new" "$DIR/versions/$ver"
+use "$ver"
+[ "$WANT" != latest ] || touch "$DIR/.checked-latest"
+
+# Keep the three newest versions
+mapfile -t old < <(ls -1 "$DIR/versions" | grep -v '\.new$' | sort -V | head -n -3)
+for v in "${old[@]}"; do
+    if [ "$v" != "$ver" ]; then rm -rf "${DIR:?}/versions/$v"; fi
+done
+echo "Codex $ver ready (before: ${prev:-none})"

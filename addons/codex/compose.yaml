@@ -1,0 +1,26 @@
+# codex add-on:
+#   mkdir -p codex && cp ../../addons/codex/codex.env.example codex.env
+#   docker compose -f compose.yaml -f ../../addons/codex/compose.yaml up -d
+# Paths are relative to deploy/compose (the first compose file's folder).
+# codex.env and the codex/ folder must be readable (and codex/ writable) by uid 1000
+# inside the agent: your user with compose.podman.yaml, otherwise chown 1000 them.
+services:
+  gateway:
+    volumes:
+      # allowlists OpenAI's API, login and the npm registry
+      - ${CODEX_ENV:-./codex.env}:/etc/agent-sandbox/addons/codex.env:ro
+  agent:
+    environment:
+      CODEX_HOME: /home/agent/.codex
+    volumes:
+      - ../../addons/codex:/opt/agent-sandbox/addons/codex:ro
+      - ${CODEX_ENV:-./codex.env}:/run/agent-sandbox/addons/codex.env:ro
+      # config.toml, auth.json, sessions: a host folder (copy auth.json into it), or a
+      # named volume (CODEX_CONFIG=codex-home in .env)
+      - ${CODEX_CONFIG:-./codex}:/home/agent/.codex
+      # The CLI, installed by the entrypoint (root-owned, read-only for the agent)
+      - codex-cli:/opt/codex
+
+volumes:
+  codex-home: { name: agent-sandbox-codex }
+  codex-cli:  { name: agent-sandbox-codex-cli }

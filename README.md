@@ -4,8 +4,9 @@
 [![Human review](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/industrial-mathematics-group/agent-sandbox/badges/ai-human-review.json)](https://github.com/industrial-mathematics-group/.github/blob/main/.github/CONTRIBUTING.md#h-human-review)
 [![AI review](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/industrial-mathematics-group/agent-sandbox/badges/ai-review.json)](https://github.com/industrial-mathematics-group/.github/blob/main/.github/CONTRIBUTING.md#a-ai-review)
 
-Sandboxed containers for running Claude Code (and similar coding agents) with
-`--dangerously-skip-permissions`, without handing them your machine or your network.
+Sandboxed containers for running Claude Code or OpenAI Codex (and similar coding agents)
+with `--dangerously-skip-permissions` / `--yolo`, without handing them your machine or your
+network.
 
 - **Small images per language:** node, python, julia, or all of them, each optionally
   with a virtual display, headless Chromium or ROCm.
@@ -14,15 +15,19 @@ Sandboxed containers for running Claude Code (and similar coding agents) with
   proxy, so the agent can't change the rules. Only allowlisted hosts get through; LAN,
   cloud metadata and IPv6 are blocked. Optionally all traffic leaves only through a
   Tailscale exit node.
-- **Add-ons** for local GPUs, for running jobs on a remote GPU server or a Slurm
+- **The coding agent is an add-on:** [claude-code](addons/claude-code/README.md) and
+  [codex](addons/codex/README.md) install their CLI at container start and mount its
+  config folder (`~/.claude`, `~/.codex`). Either, both, and the gateway only lets the
+  sandbox reach the providers of the agents it runs.
+- **More add-ons** for local GPUs, for running jobs on a remote GPU server or a Slurm
   cluster through restricted SSH gateways, for a Git hosting account (push, pull, API
   with a token) and for push notifications. Enabling one allowlists its hosts.
 - **Runs on** rootless Podman with Quadlet (systemd user services, recommended on
   Linux) or Docker / Podman Compose.
 
 The design is inspired by Anthropic's reference devcontainer (no files copied). Not an
-Anthropic product. Claude Code itself is not part of the images: it is downloaded from
-Anthropic when a container starts (see [What's isolated](#whats-isolated)).
+Anthropic or OpenAI product. Neither Claude Code nor Codex is part of the images: the
+add-ons download them when a container starts (see [What's isolated](#whats-isolated)).
 
 ```
 ┌─ network namespace of the gateway ──────────────────────────────────────────┐
@@ -62,14 +67,16 @@ Gateway: `ghcr.io/OWNER/agent-sandbox-gateway:latest` (plain) and `:tailscale`.
 | base | `images/base` | Debian trixie, git, gh, delta, zsh, build tools, entrypoint |
 | language images | `images/node`, `images/python`, `images/julia`, `images/octave` | Node 26 LTS + corepack · uv · Julia (checksum-verified) · GNU Octave |
 | general add-ons (image layers) | `layers/xvfb`, `layers/chromium`, `layers/rocm` | Virtual X display + Mesa · headless Chromium · ROCm runtime |
-| final step | `images/final` | Proxy settings, managed CLAUDE.md, mount point for Claude Code (last step of every image) |
+| final step | `images/final` | Proxy settings, environment notes for the agent (last step of every image) |
 | gateway | `gateway` | Firewall, proxy, allowlists (`gateway/lists/*.list`) |
-| specific add-ons | `addons/gpu-local`, `addons/gpu-remote`, `addons/slurm`, `addons/git-remote`, `addons/notify` | Local GPU drop-ins · remote GPU gateway · Slurm gateway · Git hosting account · notifications |
+| specific add-ons | `addons/claude-code`, `addons/codex`, `addons/gpu-local`, `addons/gpu-remote`, `addons/slurm`, `addons/git-remote`, `addons/notify` | Claude Code · Codex · local GPU drop-ins · remote GPU gateway · Slurm gateway · Git hosting account · notifications |
 | deployment | `deploy/quadlet`, `deploy/compose` | Quadlet templates + `setup.sh` · Compose files |
 
-Each layer adds a fragment to the managed `/etc/claude-code/CLAUDE.md`, and so does each
-mounted add-on, so Claude is told exactly which tools it has. The file is root-owned
-and loaded in every session.
+Each layer adds a fragment to the environment notes (`/etc/agent-sandbox/AGENTS.md`), and
+so does each mounted add-on, so the agent is told exactly which tools it has. The file is
+root-owned; the claude-code add-on hands it to Claude Code as the managed
+`/etc/claude-code/CLAUDE.md` (loaded in every session), the codex add-on to Codex as
+`developer_instructions` in `/etc/codex/config.toml`.
 
 Build locally instead of pulling: `./build.sh --list`, then e.g. `./build.sh node gateway`
 (Podman or Docker, images tagged `localhost/…`; use `--registry localhost` below).
@@ -81,14 +88,19 @@ cd deploy/compose
 cp .env.example .env                      # REGISTRY, FLAVOR, WORKSPACE, ports
 cp gateway.env.example gateway.env        # mode, allowlist profiles
 cp sandbox.env.example sandbox.env        # visible to the agent: no secrets
+cp ../../addons/claude-code/claude-code.env.example claude-code.env   # Claude Code version
 touch extra.list                          # your own allowed hosts
 docker compose up -d
-docker compose logs -f agent              # wait for "Network ready"
+docker compose logs -f agent              # wait for "Sandbox ready"
 docker compose exec -u agent agent claude # first time: log in
 ```
 
-Rootless Podman: add `-f compose.podman.yaml` (maps your user to `agent`). Tailscale exit
-node: add `-f compose.tailscale.yaml` and set `TS_*` in `gateway.env`. One Compose
+`COMPOSE_FILE` in `.env` lists the Compose files, by default `compose.yaml` and the
+claude-code add-on. For Codex add `../../addons/codex/compose.yaml` (or use it instead of
+claude-code) and see [its README](addons/codex/README.md) for the login. Rootless Podman: add
+`compose.podman.yaml` (maps your user to `agent`). Tailscale exit
+node: add `compose.tailscale.yaml` and set `TS_*` in `gateway.env`. Files given with `-f`
+replace `COMPOSE_FILE` instead of adding to it. One Compose
 project is one sandbox; for several projects, keep one env file per project
 (`docker compose --env-file web.env up -d`) with its own `SANDBOX_NAME` and `WORKSPACE`.
 
@@ -110,16 +122,19 @@ so a container escape lands in an empty account. Needs Podman >= 5.0.
    It sets up subuids, linger, the workspace (shared with your user via ACLs,
    SELinux-labelled), and writes the units and config for that combination
    (`--help` lists everything: `--net tailscale`, `--mode`, `--gpu`, `--addon`, limits).
+   Claude Code is included unless you choose agents yourself: `--addon codex` for Codex
+   only, `--addon claude-code --addon codex` for both.
 3. As the sandbox user (`sudo machinectl shell agent-sandbox@`):
    ```bash
    nano ~/.config/agent-sandbox/web/gateway.env
    systemctl --user daemon-reload
    systemctl --user start web-gateway web
    systemctl --user enable --now podman-auto-update.timer
-   podman exec -it -u agent web claude
+   podman exec -it -u agent web claude      # or codex (log in first: addons/codex/README.md)
    ```
 
-Day to day: `podman exec -it -u agent web claude --dangerously-skip-permissions`. An alias
+Day to day: `podman exec -it -u agent web claude --dangerously-skip-permissions` (Codex:
+`codex --dangerously-bypass-approvals-and-sandbox`). An alias
 from your own account saves the user switch:
 
 ```bash
@@ -127,7 +142,8 @@ alias claude-web='sudo machinectl shell agent-sandbox@ /usr/bin/podman exec -it 
 ```
 
 Always pass `-u agent` to `exec`. Run `setup.sh` again with another `--name` for another
-project; Claude's login (`~/.claude`) and the language caches are shared volumes.
+project; Claude's login (`~/.claude`), Codex's (`~/.config/agent-sandbox/codex/` of the
+sandbox user) and the language caches are shared between instances.
 
 **Restarts:** the agent unit is bound to its gateway (`BindsTo=`/`PartOf=`), so
 `systemctl --user restart web-gateway` restarts both. A restarted gateway has a new
@@ -141,7 +157,9 @@ and `GATEWAY_EXTRA_DOMAINS`. Entries are host names; `*.example.com` matches
 
 | List | Hosts |
 |---|---|
-| `base` | Anthropic API and login, Claude Code downloads (`downloads.claude.ai`), GitHub (incl. `*.githubusercontent.com`) |
+| `base` | GitHub (incl. `*.githubusercontent.com`) |
+| add-on `claude-code` | Anthropic API and login, Claude Code downloads (`downloads.claude.ai`) |
+| add-on `codex` | OpenAI API, ChatGPT login and backend (`auth.openai.com`, `chatgpt.com`), `registry.npmjs.org` (Codex downloads) |
 | `node` | npm, yarn, JSR, nodejs.org, Playwright downloads, Prisma engines, Google Fonts |
 | `python` | PyPI, PyTorch wheels |
 | `julia` | Pkg servers, Julia storage and binaries |
@@ -193,8 +211,8 @@ own hosts (`*_PRIVATE_IP` in their env file, see [Add-ons](#add-ons)).
 | Network | See above. The rules live in the gateway; the agent has no network capabilities. Secrets for the gateway (Tailscale auth key) are only in `gateway.env`. |
 | Privileges | No sudo, `no-new-privileges`, all capabilities dropped (the entrypoint keeps SETUID/SETGID only to switch to `agent`). |
 | Resources | Memory, CPU and process limits per container, so a runaway test can't freeze the machine. |
-| Claude Code | Installed at container start by `install-claude-code` (as root, before the switch to `agent`) into the root-owned volume `agent-sandbox-claude-cli`, so the agent can run but not replace it; its own auto-updater is off. `CLAUDE_CODE_VERSION` in `sandbox.env`: `stable` (default) or `latest` are checked at most once a day (`CLAUDE_CODE_CHECK_MINUTES`), an exact version such as `2.1.30` pins it. If the download fails, the version already in the volume is kept. Needs `claude.ai` and `downloads.claude.ai` (in `base.list`). |
-| Persistence | Named volumes: `agent-sandbox-claude` (login, settings), `-claude-cli` (Claude Code binaries), `-history`, `-cache` (uv, npm, Playwright), `-npm`, `-uv-python`, `-julia-depot`, `-octave` (Forge packages). |
+| Agent CLIs | Installed at container start by the [claude-code](addons/claude-code/README.md) and [codex](addons/codex/README.md) add-ons (as root, before the switch to `agent`) into the root-owned volumes `agent-sandbox-claude-cli` and `agent-sandbox-codex-cli`, so the agent can run but not replace them; their own updaters are off. Versions: `CLAUDE_CODE_VERSION` in `claude-code.env` (`stable`, `latest`, or exact), `CODEX_VERSION` in `codex.env` (`latest` or exact); channels are checked at most once a day, and a failed download keeps the installed version. |
+| Persistence | Named volumes: `agent-sandbox-claude` (Claude login, settings), `-claude-cli`, `-codex-cli` (agent binaries), `-history`, `-cache` (uv, npm, Playwright), `-npm`, `-uv-python`, `-julia-depot`, `-octave` (Forge packages). Codex's home is a host folder by default. |
 
 ## Graphics, browsers, dev servers
 
@@ -222,16 +240,19 @@ own chain in `build.sh`. Specific add-ons (`addons/`) are switched on per instan
 
 | Add-on | What | Enable |
 |---|---|---|
+| [claude-code](addons/claude-code/README.md) | Claude Code: CLI installed at start, `~/.claude` mounted, Anthropic hosts allowed | default / `--addon claude-code` / `addons/claude-code/compose.yaml` |
+| [codex](addons/codex/README.md) | OpenAI Codex: CLI installed at start, `~/.codex` mounted, OpenAI hosts allowed, Codex's own sandbox off | `--addon codex` / `addons/codex/compose.yaml` |
 | [gpu-local](addons/gpu-local/README.md) | AMD (ROCm) or NVIDIA (CDI) GPU of this machine | `--gpu amd\|nvidia` / `compose.gpu-*.yaml` |
 | [gpu-remote](addons/gpu-remote/README.md) | Julia tests on a remote GPU server, via a forced-command SSH gateway + bubblewrap | `--addon gpu-remote` / `addons/gpu-remote/compose.yaml` |
 | [slurm](addons/slurm/README.md) | Jobs on an HPC cluster with capped resources, via a forced-command SSH gateway | `--addon slurm` / `addons/slurm/compose.yaml` |
 | [git-remote](addons/git-remote/README.md) | One GitHub / Forgejo / GitLab account: host, service and token; git push/pull over HTTPS and API calls | `--addon git-remote` / `addons/git-remote/compose.yaml` |
 | [notify](addons/notify/README.md) | Push notifications (ntfy, Gotify, Discord, Slack, webhook) when Claude needs you, plus a `notify` command | `--addon notify` / `addons/notify/compose.yaml` |
 
-A specific add-on mounts its client (`bin/`), its `claude.md` and optional start-up hooks
-(`entrypoint.d/`) read-only into `/opt/agent-sandbox/addons/<name>/`; the entrypoint links
-its commands into `/opt/agent-sandbox/bin` (on `PATH`, also for `podman exec`), adds it to
-the managed CLAUDE.md and runs the hooks. Its settings live in
+A specific add-on mounts its client (`bin/`), helpers for its hooks (`libexec/`), its
+`claude.md` and optional start-up hooks (`entrypoint.d/`) read-only into
+`/opt/agent-sandbox/addons/<name>/`; the entrypoint links its commands into
+`/opt/agent-sandbox/bin` (on `PATH`, also for `podman exec`), adds its `claude.md` to the
+agent's environment notes and runs the hooks (as root, before dropping to `agent`). Its settings live in
 `<name>.env` next to `gateway.env`.
 
 **Firewall:** the add-on's env file is also mounted into the gateway
@@ -253,8 +274,8 @@ add-on off.
   fine-grained token scoped to the repositories the agent should push to.
 - **Update:** images: Quadlet automatically via `podman-auto-update.timer` (`podman
   auto-update` by hand), Compose `docker compose pull && docker compose up -d`. Claude
-  Code: restart the container (a channel is re-checked after a day; delete
-  `/opt/claude-code/.checked-*` as root to force it).
+  Code and Codex: restart the container (a channel is re-checked after a day; delete
+  `/opt/claude-code/.checked-*` or `/opt/codex/.checked-latest` as root to force it).
 - **Reset state:** stop the sandbox, then `podman volume rm agent-sandbox-julia-depot`
   (or another volume).
 
@@ -276,8 +297,11 @@ Start with the gateway log (`journalctl --user -u <name>-gateway -e` or
   sudo modprobe -a ip_set ip_set_hash_net xt_set xt_mark xt_owner xt_multiport tun
   printf '%s\n' ip_set ip_set_hash_net xt_set xt_mark xt_owner xt_multiport tun | sudo tee /etc/modules-load.d/agent-sandbox.conf
   ```
-- **`claude: command not found`:** the start-up install failed. The agent log says why;
-  usually `downloads.claude.ai` is not reachable through the gateway.
+- **`claude: command not found`** (or `codex`): the add-on isn't mounted, or the start-up
+  install failed. The agent log says which; usually `claude-code.env` / `codex.env` isn't
+  mounted into the gateway, so `downloads.claude.ai` / `registry.npmjs.org` is refused. An
+  instance set up before Claude Code became an add-on needs `setup.sh` once more, see
+  [claude-code](addons/claude-code/README.md#instances-set-up-before-claude-code-was-an-add-on).
 - **Units don't exist after `daemon-reload`:** run `/usr/libexec/podman/quadlet -dryrun -user`;
   it prints the parsing error. Drop-ins and `Network=<name>.container` need Podman >= 5.0.
 - **Services stop when you log out:** linger is off. `sudo loginctl enable-linger agent-sandbox`.
@@ -302,10 +326,11 @@ Start with the gateway log (`journalctl --user -u <name>-gateway -e` or
 - Opened inbound ports are reachable by every device your ACLs (or localhost users)
   allow. Dev servers, Bonito and ocp_vscode have no authentication.
 - Anything in the agent's environment (`sandbox.env`, e.g. `ANTHROPIC_API_KEY`) is
-  readable by the agent, and so are the tokens of the git-remote and notify add-ons.
+  readable by the agent, and so are its own logins (`~/.claude`, `~/.codex/auth.json`) and
+  the tokens of the git-remote and notify add-ons.
 
 ## License
 
 The files in this repository are MIT licensed ([LICENSE](LICENSE)). The images contain
-third-party software under its own licenses, and Claude Code is downloaded at runtime
-under Anthropic's terms; see [NOTICE](NOTICE).
+third-party software under its own licenses, and Claude Code and Codex are downloaded at
+runtime under their vendors' terms; see [NOTICE](NOTICE).

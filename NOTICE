@@ -19,16 +19,18 @@ keeps its own license, for example:
     uv (MIT or Apache-2.0), Tailscale (BSD-3-Clause), ROCm (various).
     Sources are available from their upstream projects.
 
-Claude Code
------------
-Claude Code is NOT included in the images. It is downloaded from Anthropic
-when a container starts and is subject to Anthropic's terms
-(https://www.anthropic.com/legal). Anthropic's API and login are used under
-the terms of your own account.
+Claude Code and Codex
+---------------------
+Neither Claude Code nor the OpenAI Codex CLI is included in the images. The
+claude-code and codex add-ons download them when a container starts. Claude
+Code is subject to Anthropic's terms (https://www.anthropic.com/legal), Codex
+to its license (Apache-2.0, https://github.com/openai/codex) and OpenAI's
+terms. Both providers' APIs and logins are used under the terms of your own
+account.
 
 Design
 ------
 The overall design (firewalled devcontainer for coding agents) is inspired by
 Anthropic's reference devcontainer for Claude Code. No files were copied from it.
 
-agent-sandbox is not an Anthropic product.
+agent-sandbox is not an Anthropic or OpenAI product.
