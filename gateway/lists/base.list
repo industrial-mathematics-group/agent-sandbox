@@ -1,12 +1,9 @@
 # Always loaded. One host per line; "*.example.com" matches example.com and all
 # its subdomains. Lines starting with # are comments.
 
-# Claude API + login (Pro/Max OAuth); Claude Code downloads (installed at start)
-api.anthropic.com
-claude.ai
-downloads.claude.ai
-console.anthropic.com
-platform.claude.com
+# The coding agents' hosts (Anthropic, OpenAI) are not here: the claude-code and
+# codex add-ons allowlist them from their env files, so a sandbox only reaches the
+# provider of the agent it runs.
 
 # GitHub: git over https/ssh, API, release downloads, raw files
 github.com

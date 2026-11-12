@@ -17,8 +17,13 @@
 #   --port N             publish/open a TCP port for dev servers (repeatable).
 #                        plain: published on 127.0.0.1:N of the host; tailscale: open on the tailnet
 #   --gpu amd|nvidia     local GPU (amd switches to the -rocm image)
-#   --addon NAME         specific add-on: gpu-remote, slurm, git-remote, notify (repeatable).
-#                        Its hosts are allowlisted in the gateway automatically.
+#   --addon NAME         add-on: claude-code, codex, gpu-remote, slurm, git-remote, notify
+#                        (repeatable). Its hosts are allowlisted in the gateway automatically.
+#                        claude-code is added unless claude-code or codex is given.
+#   --claude-config SRC  ~/.claude of the claude-code add-on: a named volume or an absolute
+#                        host folder (default: volume agent-sandbox-claude, shared by instances)
+#   --codex-config SRC   ~/.codex of the codex add-on: an absolute host folder or a named
+#                        volume (default: ~SANDBOX_USER/.config/agent-sandbox/codex, shared)
 #   --memory SIZE --cpus N   container limits (default: 16g, min(8, nproc))
 #   --registry REG       image registry (default: $AGENT_SANDBOX_REGISTRY or ghcr.io/OWNER;
 #                        use "localhost" for images built with ./build.sh)
@@ -43,6 +48,8 @@ PROFILES=
 PORTS=()
 GPU=
 ADDONS=()
+CLAUDE_CONFIG=agent-sandbox-claude
+CODEX_CONFIG=
 MEMORY=16g
 CPUS=$(n=$(nproc 2>/dev/null || echo 8); [ "$n" -lt 8 ] && echo "$n" || echo 8)   # 8, or fewer on smaller hosts
 REGISTRY=${AGENT_SANDBOX_REGISTRY:-ghcr.io/OWNER}
@@ -50,7 +57,7 @@ SANDBOX_USER=agent-sandbox
 HOST_SETUP=1
 DRY=0
 
-usage() { sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'; }
 while [ $# -gt 0 ]; do
     case "$1" in
         --name)         NAME=$2; shift 2 ;;
@@ -62,6 +69,8 @@ while [ $# -gt 0 ]; do
         --port)         PORTS+=("$2"); shift 2 ;;
         --gpu)          GPU=$2; shift 2 ;;
         --addon)        ADDONS+=("$2"); shift 2 ;;
+        --claude-config) CLAUDE_CONFIG=$2; shift 2 ;;
+        --codex-config) CODEX_CONFIG=$2; shift 2 ;;
         --memory)       MEMORY=$2; shift 2 ;;
         --cpus)         CPUS=$2; shift 2 ;;
         --registry)     REGISTRY=$2; shift 2 ;;
@@ -80,8 +89,21 @@ case "$NET" in plain|tailscale) ;; *) die "--net must be plain or tailscale" ;; 
 case "$MODE" in standard|strict|open) ;; *) die "--mode must be standard, strict or open" ;; esac
 case "$GPU" in ""|amd|nvidia) ;; *) die "--gpu must be amd or nvidia" ;; esac
 for a in "${ADDONS[@]}"; do
-    case "$a" in gpu-remote|slurm|git-remote|notify) ;; *) die "unknown add-on $a (gpu-remote, slurm, git-remote, notify)" ;; esac
+    case "$a" in claude-code|codex|gpu-remote|slurm|git-remote|notify) ;;
+        *) die "unknown add-on $a (claude-code, codex, gpu-remote, slurm, git-remote, notify)" ;; esac
 done
+# A sandbox without a coding agent is rarely what you want: Claude Code by default
+case " ${ADDONS[*]} " in
+    *" claude-code "*|*" codex "*) ;;
+    *) echo "NOTE: no agent add-on given (--addon claude-code / codex); adding claude-code."
+       ADDONS=(claude-code "${ADDONS[@]}") ;;
+esac
+# Sorted and unique, so drop-ins and messages come in a stable order
+mapfile -t ADDONS < <(printf '%s\n' "${ADDONS[@]}" | sort -u)
+has_addon() { case " ${ADDONS[*]} " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+config_src_ok() { [[ "$1" =~ ^/[^:,[:space:]]*$ || "$1" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; }
+config_src_ok "$CLAUDE_CONFIG" || die "--claude-config: a volume name or an absolute path without ':' or ','"
+[ -z "$CODEX_CONFIG" ] || config_src_ok "$CODEX_CONFIG" || die "--codex-config: a volume name or an absolute path without ':' or ','"
 for p in "${PORTS[@]}"; do [[ "$p" =~ ^[0-9]{1,5}$ ]] || die "bad port $p"; done
 [ "$REGISTRY" != ghcr.io/OWNER ] || die "set --registry (or AGENT_SANDBOX_REGISTRY), e.g. ghcr.io/<owner> or localhost"
 
@@ -117,6 +139,11 @@ WORKSPACE=$(realpath -m "$WORKSPACE")
 UNIT_DIR=$SB_HOME/.config/containers/systemd
 CONFIG_DIR=$SB_HOME/.config/agent-sandbox/$NAME
 ADDON_DIR=$SB_HOME/.config/agent-sandbox/addons
+CODEX_CONFIG=${CODEX_CONFIG:-$SB_HOME/.config/agent-sandbox/codex}
+# Host folders get the shared SELinux label (several instances mount them); named
+# volumes need none. In units, the sandbox user's home is written as %h.
+mount_src() { case "$1" in /*) printf '%s' "${1/#$SB_HOME/%h}" ;; *) printf '%s' "$1" ;; esac; }
+mount_opts() { case "$1" in /*) printf ':z' ;; esac; }
 
 # Run as the sandbox user's file owner (sudo unless it's you)
 run() { if [ "$DRY" = 1 ]; then echo "  + $*"; else "$@"; fi; }
@@ -144,6 +171,8 @@ render() {   # render <template> <out>: fill in @VARS@
         -v gw="$REGISTRY/agent-sandbox-gateway:latest" -v gwts="$REGISTRY/agent-sandbox-gateway:tailscale" \
         -v config="${CONFIG_DIR/#$SB_HOME/%h}" -v addon="${ADDON_DIR/#$SB_HOME/%h}" \
         -v ws="$WORKSPACE" -v mem="$MEMORY" -v cpus="$CPUS" -v profiles="$PROFILES" -v ports="$ports_csv" \
+        -v claudecfg="$(mount_src "$CLAUDE_CONFIG")" -v claudeopts="$(mount_opts "$CLAUDE_CONFIG")" \
+        -v codexcfg="$(mount_src "$CODEX_CONFIG")" -v codexopts="$(mount_opts "$CODEX_CONFIG")" \
         -v publish="$(printf '%s\n' "${publish[@]}")" -v langvols="$(printf '%s\n' "${LANG_VOLUMES[@]}")" '
         $0 == "@PUBLISH_PORTS@" { if (publish != "") printf "%s\n", publish; else print "# (none)"; next }
         $0 == "@LANG_VOLUMES@" { if (langvols != "") printf "%s\n", langvols; next }
@@ -151,6 +180,8 @@ render() {   # render <template> <out>: fill in @VARS@
           gsub(/@GATEWAY_TS_IMAGE@/, gwts); gsub(/@GATEWAY_IMAGE@/, gw)
           gsub(/@CONFIG_DIR@/, config); gsub(/@ADDON_DIR@/, addon); gsub(/@WORKSPACE@/, ws)
           gsub(/@MEMORY@/, mem); gsub(/@CPUS@/, cpus); gsub(/@PROFILES@/, profiles); gsub(/@INBOUND_PORTS@/, ports)
+          gsub(/@CLAUDE_CONFIG_OPTS@/, claudeopts); gsub(/@CLAUDE_CONFIG@/, claudecfg)
+          gsub(/@CODEX_CONFIG_OPTS@/, codexopts); gsub(/@CODEX_CONFIG@/, codexcfg)
           print }' "$1" > "$2"
 }
 
@@ -242,15 +273,22 @@ dropins=()
 [ -n "$GPU" ] && dropins+=("$REPO/addons/gpu-local/quadlet/10-gpu-$GPU.conf")
 for a in "${ADDONS[@]}"; do
     case "$a" in
+        claude-code) dropins+=("$REPO/addons/claude-code/quadlet/20-claude-code.conf") ;;
+        codex)      dropins+=("$REPO/addons/codex/quadlet/21-codex.conf") ;;
         gpu-remote) dropins+=("$REPO/addons/gpu-remote/quadlet/30-gpu-remote.conf") ;;
         slurm)      dropins+=("$REPO/addons/slurm/quadlet/31-slurm.conf") ;;
         git-remote) dropins+=("$REPO/addons/git-remote/quadlet/32-git-remote.conf") ;;
         notify)     dropins+=("$REPO/addons/notify/quadlet/33-notify.conf") ;;
     esac
-    # The add-on's client, claude.md and start-up hooks, mounted read-only into the agent
-    make_dir "$ADDON_DIR" "$ADDON_DIR/$a" "$ADDON_DIR/$a/bin"
+    # The add-on's client (bin/: on PATH), helpers its hooks run as root (libexec/),
+    # claude.md and start-up hooks, mounted read-only into the agent
+    make_dir "$ADDON_DIR" "$ADDON_DIR/$a"
     ssh_addon "$a" && make_dir "$CONFIG_DIR/${a%%-*}-ssh"
-    for f in "$REPO/addons/$a/bin/"*; do install_file 755 "$f" "$ADDON_DIR/$a/bin/$(basename "$f")"; done
+    for sub in bin libexec; do
+        [ -d "$REPO/addons/$a/$sub" ] || continue
+        make_dir "$ADDON_DIR/$a/$sub"
+        for f in "$REPO/addons/$a/$sub/"*; do install_file 755 "$f" "$ADDON_DIR/$a/$sub/$(basename "$f")"; done
+    done
     install_file 644 "$REPO/addons/$a/claude.md" "$ADDON_DIR/$a/claude.md"
     if [ -d "$REPO/addons/$a/entrypoint.d" ]; then
         make_dir "$ADDON_DIR/$a/entrypoint.d"
@@ -258,6 +296,14 @@ for a in "${ADDONS[@]}"; do
     fi
     env=$CONFIG_DIR/$a.env
     if exists "$env"; then echo "   keeping $env"; else install_file 600 "$REPO/addons/$a/$a.env.example" "$env"; fi
+done
+# Agent config folders given as host paths: create them for the sandbox user. A
+# folder outside its home (e.g. an existing /srv/... one) is left as it is.
+for cfg in "$(has_addon claude-code && echo "$CLAUDE_CONFIG")" "$(has_addon codex && echo "$CODEX_CONFIG")"; do
+    case "$cfg" in
+        "$SB_HOME"/*) exists "$cfg" || make_dir "$cfg" ;;
+        /*)           exists "$cfg" || echo "WARNING: $cfg does not exist; create it for $SANDBOX_USER (mode 700)." ;;
+    esac
 done
 # Gateway side of each add-on: it reads the add-on's env file and allowlists its
 # hosts (*_HOST, *_URL) and private addresses (*_PRIVATE_IP).
@@ -301,7 +347,8 @@ $( [ "$SAME_USER" = 0 ] && echo "  sudo machinectl shell $SANDBOX_USER@" )
   nano ${CONFIG_DIR/#$SB_HOME/\~}/extra.list        # your own allowed hosts
 $( for a in "${ADDONS[@]}"; do
        if ssh_addon "$a"; then echo "  nano ${CONFIG_DIR/#$SB_HOME/\~}/$a.env   # + SSH key in ${CONFIG_DIR/#$SB_HOME/\~}/${a%%-*}-ssh/ (addons/$a/README.md)"
-       else echo "  nano ${CONFIG_DIR/#$SB_HOME/\~}/$a.env   # host, token (addons/$a/README.md)"; fi
+       elif [ "$a" = codex ]; then echo "  # Codex login: copy your auth.json into ${CODEX_CONFIG/#$SB_HOME/\~}/ (addons/codex/README.md)"
+       elif [ "$a" != claude-code ]; then echo "  nano ${CONFIG_DIR/#$SB_HOME/\~}/$a.env   # host, token (addons/$a/README.md)"; fi
      done )
 $( case "$IMAGE" in localhost/*) ;; *) echo "  podman login --authfile ~/.config/containers/auth.json ${IMAGE%%/*}   # private packages: once";; esac )
   /usr/libexec/podman/quadlet -dryrun -user | less   # check the generated units
@@ -309,7 +356,8 @@ $( case "$IMAGE" in localhost/*) ;; *) echo "  podman login --authfile ~/.config
   systemctl --user start $NAME-gateway $NAME
   systemctl --user enable --now podman-auto-update.timer
   journalctl --user -u $NAME -f                     # wait for "Network ready"
-  podman exec -it -u agent $NAME claude              # first time: log in
+$( has_addon claude-code && echo "  podman exec -it -u agent $NAME claude              # first time: log in" )
+$( has_addon codex && echo "  podman exec -it -u agent $NAME codex               # or: codex login --device-auth" )
 
-Your files for Claude go into $WORKSPACE.
+Your files for the agent go into $WORKSPACE.
 EOF

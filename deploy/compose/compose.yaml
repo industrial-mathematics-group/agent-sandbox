@@ -1,14 +1,20 @@
 # agent-sandbox with Docker Compose (or podman compose).
 #
 #   cp .env.example .env && cp gateway.env.example gateway.env && cp sandbox.env.example sandbox.env
+#   cp ../../addons/claude-code/claude-code.env.example claude-code.env
 #   touch extra.list
-#   docker compose up -d
+#   docker compose -f compose.yaml -f ../../addons/claude-code/compose.yaml up -d
 #   docker compose exec -u agent agent claude
+#
+# No coding agent is included by default: add the claude-code and/or codex add-on.
+# COMPOSE_FILE in .env saves typing the -f list.
 #
 # One Compose project = one sandbox. For several projects, use one copy of .env per
 # project with its own SANDBOX_NAME and WORKSPACE (docker compose --env-file web.env ...).
 #
 # Overlays (add with -f, paths relative to this folder):
+#   ../../addons/claude-code/compose.yaml           Claude Code (CLI + ~/.claude)
+#   ../../addons/codex/compose.yaml                 OpenAI Codex (CLI + ~/.codex)
 #   compose.tailscale.yaml                          egress only via a Tailscale exit node
 #   compose.podman.yaml                             rootless Podman (keep-id user mapping)
 #   ../../addons/gpu-local/compose.gpu-amd.yaml     local AMD GPU   (FLAVOR=full-rocm)
@@ -52,9 +58,6 @@ services:
       GIT_CONFIG_VALUE_0: "*"
     volumes:
       - ${WORKSPACE:-./workspace}:/workspace
-      - claude:/home/agent/.claude
-      # Claude Code CLI, installed by the entrypoint (root-owned, read-only for the agent)
-      - claude-cli:/opt/claude-code
       - history:/commandhistory
       - cache:/home/agent/.cache
       - npm:/home/agent/.npm
@@ -75,8 +78,6 @@ services:
 
 # Shared by every sandbox on this machine (fixed names, no project prefix)
 volumes:
-  claude:      { name: agent-sandbox-claude }
-  claude-cli:  { name: agent-sandbox-claude-cli }
   history:     { name: agent-sandbox-history }
   cache:       { name: agent-sandbox-cache }
   npm:         { name: agent-sandbox-npm }

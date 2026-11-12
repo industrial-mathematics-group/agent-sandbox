@@ -1,0 +1,27 @@
+# claude-code add-on (part of the quick start):
+#   docker compose -f compose.yaml -f ../../addons/claude-code/compose.yaml up -d
+# Paths are relative to deploy/compose (the first compose file's folder).
+# claude-code.env must exist (cp ../../addons/claude-code/claude-code.env.example claude-code.env)
+# and be readable by uid 1000 inside the agent.
+services:
+  gateway:
+    volumes:
+      # allowlists Anthropic's API, login and download hosts
+      - ${CLAUDE_CODE_ENV:-./claude-code.env}:/etc/agent-sandbox/addons/claude-code.env:ro
+  agent:
+    environment:
+      DISABLE_AUTOUPDATER: "1"
+      CLAUDE_CONFIG_DIR: /home/agent/.claude
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+    volumes:
+      - ../../addons/claude-code:/opt/agent-sandbox/addons/claude-code:ro
+      - ${CLAUDE_CODE_ENV:-./claude-code.env}:/run/agent-sandbox/addons/claude-code.env:ro
+      # Login, settings, memory: the shared named volume, or a host folder
+      # (CLAUDE_CONFIG=/path/to/folder in .env)
+      - ${CLAUDE_CONFIG:-claude}:/home/agent/.claude
+      # The CLI, installed by the entrypoint (root-owned, read-only for the agent)
+      - claude-cli:/opt/claude-code
+
+volumes:
+  claude:     { name: agent-sandbox-claude }
+  claude-cli: { name: agent-sandbox-claude-cli }

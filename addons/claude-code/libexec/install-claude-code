@@ -1,8 +1,9 @@
 #!/bin/bash
-# Installs the Claude Code CLI into /opt/claude-code at container start.
-# Called by the entrypoint as root, before it drops to `agent`, so the result is
-# root-owned and read-only for the agent. Downloads go through the gateway proxy
-# (claude.ai and downloads.claude.ai are on base.list).
+# Installs the Claude Code CLI into /opt/claude-code at container start (claude-code
+# add-on). Run by the add-on's entrypoint hook as root, before the entrypoint drops
+# to `agent`, so the result is root-owned and read-only for the agent. Downloads go
+# through the gateway proxy (claude.ai and downloads.claude.ai come from
+# claude-code.env).
 #
 #   CLAUDE_CODE_VERSION  "stable" (default), "latest" or an exact version
 #
