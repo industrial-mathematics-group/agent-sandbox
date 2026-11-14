@@ -1,0 +1,20 @@
+name: File-signoff
+
+# Checks with aisignoff that every file (with [history], every line) is declared,
+# and publishes the file badges on pushes to the default branch.
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  merge_group:   # with a merge queue: checks the commit that will land
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  file-signoff:
+    uses: industrial-mathematics-group/.github/.github/workflows/file-signoff.yml@main
+    with:
+      weight: lines                 # weight the badges by lines instead of files
+    #   aisignoff-version: "1.0.0rc1" # another release of aisignoff than the organisation's default
