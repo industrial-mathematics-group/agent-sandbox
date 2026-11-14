@@ -1,0 +1,59 @@
+#!/bin/bash
+# github-app: GitHub access through the gateway's GitHub App token broker
+# (github-app add-on). The App's private key stays in the gateway; this only gets
+# installation tokens, which expire after an hour.
+#
+#   github-app info                     host, App, commit identity, permissions (no token)
+#   github-app token                    print a current token (for tools other than git/gh)
+#   github-app clone OWNER/REPO [DIR]   git clone over HTTPS
+#   github-app credential HOST get      git credential helper (set up in /etc/gitconfig)
+#
+# git and gh pick up tokens by themselves: git through the credential helper, gh
+# through the gh wrapper of this add-on, which sets GH_TOKEN for each call.
+set -euo pipefail
+
+BROKER=http://127.0.0.1:${GITHUB_APP_BROKER_PORT:-3129}
+usage() { sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; }
+die() { echo "github-app: $*" >&2; exit 1; }
+
+# broker <path>: JSON from the broker; its error message on failure
+broker() {
+    local out rc=0 msg
+    out=$(curl -sS --noproxy '*' --max-time 60 --fail-with-body "$BROKER$1" 2>/dev/null) || rc=$?
+    [ "$rc" = 0 ] && { printf '%s' "$out"; return; }
+    msg=$(jq -r '.error // empty' <<< "$out" 2>/dev/null || true)
+    [ -n "$msg" ] || msg="no token broker on $BROKER (curl exit $rc). Is the gateway image up to date and github-app.pem in place? The gateway log says why."
+    die "$msg"
+}
+
+cmd=${1:-}; [ $# -gt 0 ] && shift
+case "$cmd" in
+    info)
+        broker /info | jq . ;;
+    token)
+        broker /token | jq -r .token ;;
+    clone)
+        [[ "${1:-}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "expected OWNER/REPO, got '${1:-}'"
+        repo=${1%.git}; shift
+        host=$(broker /info | jq -r .host)
+        exec git clone "https://$host/$repo.git" "$@" ;;
+    credential)
+        # git credential helper protocol: answer "get" for our host only
+        want=${1:-}; [ "${2:-}" = get ] || exit 0
+        protocol= host=
+        while IFS= read -r line && [ -n "$line" ]; do
+            case "$line" in
+                protocol=*) protocol=${line#protocol=} ;;
+                host=*)     host=${line#host=} ;;
+            esac
+        done
+        [ "$protocol" = https ] && [ -n "$want" ] && [ "${host,,}" = "${want,,}" ] || exit 0
+        token=$(broker /token | jq -r '.token // empty') || exit 0
+        [ -n "$token" ] || exit 0
+        printf 'username=x-access-token\npassword=%s\n' "$token"
+        ;;
+    ""|-h|--help|help)
+        usage ;;
+    *)
+        usage >&2; exit 2 ;;
+esac

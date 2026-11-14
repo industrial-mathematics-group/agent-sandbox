@@ -1,0 +1,19 @@
+#!/bin/bash
+# gh with a fresh GitHub App installation token (github-app add-on). Installed in
+# front of /usr/bin/gh on PATH; sets GH_TOKEN (GH_ENTERPRISE_TOKEN + GH_HOST for
+# GitHub Enterprise Server) for this one call. A GH_TOKEN you set yourself wins.
+REAL=${GH_REAL:-/usr/bin/gh}
+if [ -z "${GH_TOKEN:-}${GITHUB_TOKEN:-}${GH_ENTERPRISE_TOKEN:-}" ]; then
+    if json=$(curl -sS --noproxy '*' --max-time 60 --fail-with-body \
+            "http://127.0.0.1:${GITHUB_APP_BROKER_PORT:-3129}/token" 2>/dev/null) \
+       && token=$(jq -er '.token' <<< "$json" 2>/dev/null); then
+        host=$(jq -r '.host // "github.com"' <<< "$json")
+        if [ "$host" = github.com ]; then export GH_TOKEN=$token
+        else export GH_HOST=${GH_HOST:-$host} GH_ENTERPRISE_TOKEN=$token; fi
+    else
+        err=$(jq -r '.error // empty' <<< "${json:-}" 2>/dev/null)
+        echo "gh (github-app): no token from the gateway broker (${err:-not reachable on 127.0.0.1:${GITHUB_APP_BROKER_PORT:-3129}});" \
+             "running gh without one. \`github-app info\` shows more." >&2
+    fi
+fi
+exec "$REAL" "$@"

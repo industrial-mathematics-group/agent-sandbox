@@ -1,0 +1,269 @@
+#!/bin/bash
+# github-app-broker: hands the agent short-lived GitHub App installation tokens
+# (github-app add-on). Runs in the gateway, so the App's private key never enters
+# the agent container: the agent only ever sees tokens that expire after an hour.
+#
+#   github-app-broker prepare   as root at gateway start: check the settings, copy them
+#                               and the key to the broker's own user (exit 1: don't serve)
+#   github-app-broker serve     as root: listen on 127.0.0.1:PORT as that user
+#   github-app-broker handle    one HTTP request on stdin/stdout (run by socat)
+#   github-app-broker token     print a token's JSON (debugging, as the broker user)
+#
+# HTTP, only on the loopback of the namespace the agent shares:
+#   GET /token   {"token","expires_at","host"}: cached, renewed when < 10 min are left
+#   GET /info    host, API, app, commit identity, permissions; never a token
+#
+# Settings: /etc/agent-sandbox/addons/github-app.env (parsed, not sourced), key:
+# /etc/agent-sandbox/secrets/github-app.pem. GitHub is called through the gateway's
+# own proxy (the firewall lets nothing else out), so its allowlist applies here too.
+set -euo pipefail
+
+ENV_SRC=${GITHUB_APP_ENV_FILE:-/etc/agent-sandbox/addons/github-app.env}
+KEY_SRC=${GITHUB_APP_KEY_FILE:-/etc/agent-sandbox/secrets/github-app.pem}
+STATE=${GITHUB_APP_STATE_DIR:-/var/lib/github-app}
+# The broker user can't read the mounted files (root's, mode 600): prepare copies
+# them into its state folder (0700, its own), which is what it reads afterwards.
+ENV_FILE=${GITHUB_APP_ENV_FILE:-$STATE/github-app.env}
+PORT=${GITHUB_APP_BROKER_PORT:-3129}
+PROXY=${GITHUB_APP_PROXY-http://127.0.0.1:${GATEWAY_PROXY_PORT:-3128}}
+RUN_AS=${GITHUB_APP_BROKER_USER:-ghapp}
+SELF=$(readlink -f "$0")
+RENEW_MARGIN=600   # seconds of validity a cached token must still have
+
+log() { echo "github-app: $*" >&2; }
+die() { log "$*"; exit 1; }
+
+GITHUB_APP_ID= GITHUB_APP_INSTALLATION_ID= GITHUB_APP_OWNER= GITHUB_APP_REPOSITORIES=
+GITHUB_APP_PERMISSIONS= GITHUB_APP_HOST= GITHUB_APP_API_URL= GITHUB_APP_AUTHOR_NAME=
+GITHUB_APP_AUTHOR_EMAIL=
+load_settings() {
+    [ -r "$ENV_FILE" ] || die "$ENV_FILE is not readable"
+    local line val
+    while IFS= read -r line || [ -n "$line" ]; do
+        [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?(GITHUB_APP_[A-Z_]+)=(.*)$ ]] || continue
+        val=${BASH_REMATCH[3]}
+        val=${val%%[[:space:]]#*}; val=${val%"${val##*[![:space:]]}"}
+        val=${val#[\"\']}; val=${val%[\"\']}
+        case "${BASH_REMATCH[2]}" in
+            GITHUB_APP_ID|GITHUB_APP_INSTALLATION_ID|GITHUB_APP_OWNER|GITHUB_APP_REPOSITORIES|\
+            GITHUB_APP_PERMISSIONS|GITHUB_APP_HOST|GITHUB_APP_API_URL|GITHUB_APP_AUTHOR_NAME|\
+            GITHUB_APP_AUTHOR_EMAIL)
+                printf -v "${BASH_REMATCH[2]}" '%s' "$val" ;;
+        esac
+    done < "$ENV_FILE"
+    HOST=${GITHUB_APP_HOST:-github.com}; HOST=${HOST,,}
+    [[ "$HOST" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$ ]] \
+        || die "GITHUB_APP_HOST must be a host name (got '$GITHUB_APP_HOST')"
+    if [ "$HOST" = github.com ]; then API=https://api.github.com; else API=https://$HOST/api/v3; fi
+    API=${GITHUB_APP_API_URL:-$API}; API=${API%/}
+    [[ "$GITHUB_APP_ID" =~ ^([0-9]+|Iv[0-9A-Za-z.]+)$ ]] \
+        || die "GITHUB_APP_ID must be the App ID (digits) or its Client ID (Iv...), got '$GITHUB_APP_ID'"
+    [ -z "$GITHUB_APP_INSTALLATION_ID" ] || [[ "$GITHUB_APP_INSTALLATION_ID" =~ ^[0-9]+$ ]] \
+        || die "GITHUB_APP_INSTALLATION_ID must be a number (got '$GITHUB_APP_INSTALLATION_ID')"
+    [ -z "$GITHUB_APP_OWNER" ] || [[ "$GITHUB_APP_OWNER" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]] \
+        || die "GITHUB_APP_OWNER must be an organization or user name (got '$GITHUB_APP_OWNER')"
+    [ -n "$GITHUB_APP_INSTALLATION_ID$GITHUB_APP_OWNER" ] \
+        || die "set GITHUB_APP_OWNER (the organization the App is installed on) or GITHUB_APP_INSTALLATION_ID"
+    # Fails here rather than on the first request
+    token_request_body > /dev/null
+}
+
+b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+
+# App JWT (RS256), valid 9 minutes; iat is backdated for clock skew
+app_jwt() {
+    local now header payload sig
+    now=$(date +%s)
+    header=$(printf '{"alg":"RS256","typ":"JWT"}' | b64url)
+    payload=$(jq -nc --arg iss "$GITHUB_APP_ID" --argjson now "$now" \
+        '{iat: ($now - 60), exp: ($now + 540),
+          iss: (if ($iss | test("^[0-9]+$")) then ($iss | tonumber) else $iss end)}' | b64url)
+    sig=$(printf '%s.%s' "$header" "$payload" | openssl dgst -sha256 -sign "$STATE/key.pem" -binary | b64url)
+    [ -n "$sig" ] || die "signing the App JWT failed (is the private key valid?)"
+    printf '%s.%s.%s' "$header" "$payload" "$sig"
+}
+
+# api <bearer> <METHOD> <path> [json]: response body on stdout; on an HTTP error the
+# GitHub message goes to stderr. Credentials reach curl through a file descriptor.
+api() {
+    local bearer=$1 method=$2 path=$3 out rc=0 msg errf data=()
+    [ $# -ge 4 ] && data=(-H 'Content-Type: application/json' --data-binary "$4")
+    errf=$(mktemp)
+    out=$(curl -sS --fail-with-body --max-time 30 --proxy "$PROXY" -X "$method" \
+        -H @<(printf 'Authorization: Bearer %s\n' "$bearer") \
+        -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' \
+        -H 'User-Agent: agent-sandbox-github-app' \
+        "${data[@]}" "$API$path" 2>"$errf") || rc=$?
+    if [ "$rc" != 0 ]; then
+        msg=$(jq -r '.message // empty' <<< "$out" 2>/dev/null || true)
+        [ -n "$msg" ] || msg=$(head -c 300 "$errf")
+        rm -f "$errf"
+        log "$method $path: ${msg:-curl exit $rc}"
+        return 1
+    fi
+    rm -f "$errf"
+    printf '%s' "$out"
+}
+
+installation_id() {
+    if [ -n "$GITHUB_APP_INSTALLATION_ID" ]; then echo "$GITHUB_APP_INSTALLATION_ID"; return; fi
+    if [ -s "$STATE/installation-id" ]; then cat "$STATE/installation-id"; return; fi
+    local jwt id
+    jwt=$(app_jwt) || return 1
+    id=$( { api "$jwt" GET "/orgs/$GITHUB_APP_OWNER/installation" 2>/dev/null \
+            || api "$jwt" GET "/users/$GITHUB_APP_OWNER/installation"; } | jq -r '.id // empty')
+    [[ "$id" =~ ^[0-9]+$ ]] || die "the App is not installed on '$GITHUB_APP_OWNER' (or GITHUB_APP_ID or the private key is wrong)"
+    echo "$id" > "$STATE/installation-id"
+    echo "$id"
+}
+
+# {"repositories": [...], "permissions": {...}} from the settings: narrows the token
+# below what the installation could do. Empty: everything the installation grants.
+token_request_body() {
+    local out
+    out=$(jq -nc --arg r "$GITHUB_APP_REPOSITORIES" --arg p "$GITHUB_APP_PERMISSIONS" '
+        def items: split("[ ,]+"; null) | map(select(. != ""));
+        ({} + if ($r | items | length) > 0 then {repositories: ($r | items | map(sub("^.*/"; "")))} else {} end)
+        + if ($p | items | length) > 0 then
+            {permissions: ($p | items | map(
+                if test("^[a-z_]+:(read|write|admin)$") then split(":") | {(.[0]): .[1]}
+                else error("expected name:read or name:write, got \(.)") end) | add)}
+          else {} end' 2>&1) || die "GITHUB_APP_PERMISSIONS: ${out#jq: error (at <unknown>): }"
+    printf '%s' "$out"
+}
+
+# Cached installation token (JSON), renewed when it has less than RENEW_MARGIN left
+token_json() {
+    local now exp inst resp
+    exec 9> "$STATE/lock"
+    flock 9 || die "token lock failed"   # busybox flock: no -w; holders end within curl's --max-time
+    now=$(date +%s)
+    if [ -s "$STATE/token.json" ]; then
+        exp=$(jq -r '.expires_at | fromdateiso8601' "$STATE/token.json" 2>/dev/null || echo 0)
+        if [ $((exp - now)) -gt "$RENEW_MARGIN" ]; then cat "$STATE/token.json"; return; fi
+    fi
+    inst=$(installation_id) || exit 1
+    resp=$(api "$(app_jwt)" POST "/app/installations/$inst/access_tokens" "$(token_request_body)") || {
+        rm -f "$STATE/installation-id"   # e.g. reinstalled: look it up again next time
+        die "could not create an installation token"
+    }
+    (umask 077; jq -c --arg h "$HOST" '{token, expires_at, host: $h, permissions, repository_selection,
+        repositories: ((.repositories // []) | map(.full_name))}' <<< "$resp" > "$STATE/token.json.tmp")
+    mv -f "$STATE/token.json.tmp" "$STATE/token.json"
+    log "new installation token (installation $inst, expires $(jq -r .expires_at "$STATE/token.json"))"
+    cat "$STATE/token.json"
+}
+
+# Commit identity of the App's bot user: "<slug>[bot]" <ID+slug[bot]@users.noreply.HOST>
+identity_json() {
+    if [ ! -s "$STATE/identity.json" ]; then
+        local slug id jwt tok
+        jwt=$(app_jwt) || exit 1
+        slug=$(api "$jwt" GET /app | jq -r '.slug // empty')
+        [ -n "$slug" ] || die "could not read the App"
+        tok=$(token_json | jq -r .token) || exit 1
+        id=$(api "$tok" GET "/users/$slug%5Bbot%5D" | jq -r '.id // empty')
+        [ -n "$id" ] || die "could not read the App's bot user"
+        jq -nc --arg s "$slug" --arg id "$id" --arg h "$HOST" \
+            '{app: $s, bot_name: "\($s)[bot]", bot_email: "\($id)+\($s)[bot]@users.noreply.\($h)"}' \
+            > "$STATE/identity.json"
+    fi
+    cat "$STATE/identity.json"
+}
+
+info_json() {
+    local ident='{}' tok='{}' err=""
+    try ident identity_json || { err=$ident; ident='{}'; }
+    if [ -z "$err" ]; then try tok token_json || { err=$tok; tok='{}'; }; fi
+    jq -nc --arg host "$HOST" --arg api "$API" --argjson i "$ident" --argjson t "$tok" \
+        --arg n "$GITHUB_APP_AUTHOR_NAME" --arg e "$GITHUB_APP_AUTHOR_EMAIL" --arg err "$err" '
+        {host: $host, api_url: $api, app: $i.app,
+         author_name: (if $n != "" then $n else $i.bot_name end),
+         author_email: (if $e != "" then $e else $i.bot_email end),
+         permissions: $t.permissions, repository_selection: $t.repository_selection,
+         repositories: $t.repositories, token_expires_at: $t.expires_at}
+        + (if $err != "" then {error: $err} else {} end) | with_entries(select(.value != null))'
+}
+
+# try <var> <cmd...>: stdout into <var>. Success: the command's log lines go on to
+# stderr. Failure: <var> gets the error text instead (for the HTTP answer).
+try() {
+    local __errf __rc=0 __out
+    __errf=$(mktemp)
+    __out=$("${@:2}" 2>"$__errf") || __rc=$?
+    if [ "$__rc" = 0 ]; then cat "$__errf" >&2; printf -v "$1" '%s' "$__out"
+    else printf -v "$1" '%s' "$(sed 's/^github-app: //' "$__errf" | tail -n 3)"; fi
+    rm -f "$__errf"
+    return "$__rc"
+}
+
+respond() {   # respond <status> <json>
+    local reason
+    case "$1" in 200) reason=OK ;; 404) reason="Not Found" ;; 405) reason="Method Not Allowed" ;; *) reason="Bad Gateway" ;; esac
+    printf 'HTTP/1.1 %s %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n%s\n' \
+        "$1" "$reason" $((${#2} + 1)) "$2"
+}
+
+handle() {
+    local line method path rest h out
+    export LC_ALL=C   # Content-Length counts bytes
+    IFS= read -r -t 10 line || exit 0
+    line=${line%$'\r'}
+    method=${line%% *}; rest=${line#* }; path=${rest%% *}; path=${path%%\?*}
+    # Headers are not used; read them so the client sees a clean close
+    while IFS= read -r -t 5 h; do h=${h%$'\r'}; [ -n "$h" ] || break; done
+    case "$path" in
+        /token|/info|/health) [ "$method" = GET ] || { respond 405 '{"error":"GET only"}'; return; } ;;
+        *) respond 404 '{"error":"not found (GET /token, /info)"}'; return ;;
+    esac
+    case "$path" in
+        /health) respond 200 '{"ok":true}' ;;
+        /info)   respond 200 "$(info_json)" ;;
+        /token)
+            if try out token_json; then
+                respond 200 "$(jq -c '{token, expires_at, host}' <<< "$out")"
+            else
+                respond 502 "$(jq -nc --arg e "$out" '{error: $e}')"
+            fi ;;
+    esac
+}
+
+as_broker() { su -s /bin/sh "$RUN_AS" -c "$1"; }
+
+cmd=${1:-}
+case "$cmd" in
+    prepare)
+        [ "$(id -u)" = 0 ] || die "prepare runs as root"
+        ENV_FILE=$ENV_SRC
+        load_settings
+        if [ ! -s "$KEY_SRC" ]; then
+            die "no private key: put the App's .pem into github-app.pem next to github-app.env (see addons/github-app/README.md); broker not started"
+        fi
+        [ -r "$KEY_SRC" ] || die "$KEY_SRC is not readable by the gateway (owner/mode, see addons/github-app/README.md); broker not started"
+        # Root here has no CAP_CHOWN: the broker user writes its own copy
+        as_broker "umask 077; cat > '$STATE/key.pem'" < "$KEY_SRC"
+        [ "$ENV_SRC" = "$STATE/github-app.env" ] || as_broker "umask 077; cat > '$STATE/github-app.env'" < "$ENV_SRC"
+        as_broker "openssl pkey -in '$STATE/key.pem' -noout" 2>/dev/null \
+            || die "$KEY_SRC is not a valid private key; broker not started"
+        as_broker "rm -f '$STATE/token.json' '$STATE/identity.json' '$STATE/installation-id'"
+        log "token broker on 127.0.0.1:$PORT for $HOST (app $GITHUB_APP_ID, ${GITHUB_APP_INSTALLATION_ID:+installation $GITHUB_APP_INSTALLATION_ID}${GITHUB_APP_INSTALLATION_ID:-owner $GITHUB_APP_OWNER}${GITHUB_APP_REPOSITORIES:+, repositories $GITHUB_APP_REPOSITORIES}${GITHUB_APP_PERMISSIONS:+, permissions $GITHUB_APP_PERMISSIONS})"
+        ;;
+    serve)
+        [ "$(id -u)" = 0 ] || die "serve runs as root (it drops to $RUN_AS)"
+        [[ "$PORT" =~ ^[0-9]{1,5}$ ]] || die "bad port $PORT"
+        # Loopback only: the agent shares this namespace, nothing outside reaches it
+        exec su -s /bin/sh "$RUN_AS" -c \
+            "exec socat TCP-LISTEN:$PORT,bind=127.0.0.1,reuseaddr,fork,max-children=16 EXEC:'$SELF handle'"
+        ;;
+    handle)
+        # A broken setting is answered over HTTP too, so the agent sees why
+        if ! err=$( (load_settings) 2>&1 >/dev/null); then
+            export LC_ALL=C
+            while IFS= read -r -t 5 h; do h=${h%$'\r'}; [ -n "$h" ] || break; done
+            respond 502 "$(jq -nc --arg e "${err#github-app: }" '{error: $e}')"
+            exit 0
+        fi
+        load_settings; handle ;;
+    token)  load_settings; token_json; echo ;;
+    *) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac
