@@ -17,6 +17,10 @@ credentials in every sandbox by hand.
 - `git-remote` (on the agent's `PATH`) clones, prints URLs and makes authenticated API
   calls; `git-remote gh …` runs `gh` with the token for GitHub.
 
+For GitHub, the [github-app](../github-app/README.md) add-on is usually the better
+choice: an App owned by your organization, tokens that expire after an hour, and a
+private key that never enters the agent container.
+
 **The agent can read the token**: it has to send it. Use a token that only covers what
 the agent should touch, ideally a separate bot account:
 
