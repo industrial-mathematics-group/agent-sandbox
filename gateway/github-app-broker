@@ -136,7 +136,7 @@ token_request_body() {
 token_json() {
     local now exp inst resp
     exec 9> "$STATE/lock"
-    flock -w 60 9 || die "token lock busy"
+    flock 9 || die "token lock failed"   # busybox flock: no -w; holders end within curl's --max-time
     now=$(date +%s)
     if [ -s "$STATE/token.json" ]; then
         exp=$(jq -r '.expires_at | fromdateiso8601' "$STATE/token.json" 2>/dev/null || echo 0)
