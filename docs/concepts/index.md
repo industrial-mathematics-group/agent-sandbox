@@ -3,18 +3,21 @@
 An instance of agent-sandbox is built from four kinds of parts:
 
 ```mermaid
-flowchart LR
+flowchart TB
     subgraph image["Agent image (one flavor)"]
         base["base<br/>shell, build tools, Python + uv"] --> lang["language layer<br/>node / julia / octave"]
-        lang --> utils["utils layer (-utils)<br/>Xvfb, Mesa, Chromium"]
+        lang --> utils["utils layer (-utils only)<br/>Xvfb, Mesa, Chromium"]
         utils --> final["final step<br/>proxy settings, notes"]
     end
     subgraph instance["Instance"]
-        agent["agent container"] -- "shares network namespace" --> gw["gateway container<br/>firewall + proxy"]
-        addons["add-ons<br/>claude-code, codex, github-app, ..."] -. "mounted into" .-> agent
+        agent["agent container"]
+        addons["add-ons<br/>claude-code, codex, github-app, ..."]
+        gw["gateway container<br/>firewall + proxy"]
+        addons -. "mounted into" .-> agent
         addons -. "env file allowlists hosts" .-> gw
+        agent -- "shares network namespace" --> gw
     end
-    image --> agent
+    final -- "runs as" --> agent
     gw --> internet(("allowlisted hosts"))
 ```
 
