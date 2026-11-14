@@ -21,7 +21,7 @@ token with write access to one topic, a Gotify application token, one webhook).
 
 ## Setup
 
-Quadlet: `setup.sh … --addon notify`, fill in `~/.config/agent-sandbox/<name>/notify.env`,
+Quadlet: `setup.sh … --addon notify` (existing instance: `setup.sh add-addon <name> notify`), fill in `~/.config/agent-sandbox/<name>/notify.env`,
 restart (`systemctl --user restart <name>-gateway`).
 
 Compose: copy `notify.env.example` to `deploy/compose/notify.env`, fill it in and add

@@ -64,8 +64,8 @@ key you'd trust a coding agent with.
 ## Setup
 
 Quadlet: `setup.sh … --addon codex` (plus `--addon claude-code` to keep Claude), log in as
-above, start. An existing instance: rerun `setup.sh` with your options plus
-`--addon codex` (and `--addon claude-code` if it should keep Claude Code).
+above, start. An existing instance: `setup.sh add-addon <name> codex` (it keeps Claude Code; drop that
+with `setup.sh remove-addon <name> claude-code`).
 
 Compose, in `deploy/compose`:
 
