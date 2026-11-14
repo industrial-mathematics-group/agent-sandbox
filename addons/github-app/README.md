@@ -69,7 +69,8 @@ installation covers, set `GITHUB_APP_REPOSITORIES` in that sandbox's `github-app
 
 ## 3. Set up the sandbox
 
-Quadlet: `setup.sh … --addon github-app`. Then, as the sandbox user:
+Quadlet: `setup.sh … --addon github-app`, or `setup.sh add-addon <name> github-app` for an
+existing instance. Then, as the sandbox user:
 
 ```bash
 nano ~/.config/agent-sandbox/<name>/github-app.env    # GITHUB_APP_ID, GITHUB_APP_OWNER

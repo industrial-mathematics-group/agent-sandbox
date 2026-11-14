@@ -141,7 +141,9 @@ from your own account saves the user switch:
 alias claude-web='sudo machinectl shell agent-sandbox@ /usr/bin/podman exec -it -u agent web claude --dangerously-skip-permissions'
 ```
 
-Always pass `-u agent` to `exec`. Run `setup.sh` again with another `--name` for another
+Always pass `-u agent` to `exec`. `./setup.sh show web` prints an instance's settings and
+add-ons; `./setup.sh add-addon web <addon>` / `remove-addon` change its add-ons
+([add-ons](#add-ons)). Run `setup.sh` again with another `--name` for another
 project; Claude's login (`~/.claude`), Codex's (`~/.config/agent-sandbox/codex/` of the
 sandbox user) and the language caches are shared between instances.
 
@@ -262,9 +264,20 @@ every `*_HOST` and `*_URL` value in it and lets every `*_PRIVATE_IP` address thr
 private-range block, like `GATEWAY_PRIVATE_ALLOW`. The file is parsed, not executed, and
 other keys (tokens) are ignored. The gateway log lists what each add-on added.
 
-Remove the drop-ins (Quadlet: `<name>.container.d/3x-<addon>.conf` and
-`<name>-gateway.container.d/50-addon-<addon>.conf`) or the `-f` file (Compose) to turn an
-add-on off.
+Quadlet: add or remove an add-on on an existing instance without retyping its options;
+`show` lists an instance's settings and add-ons, and the `setup.sh` line that recreates it:
+
+```bash
+./setup.sh show web
+./setup.sh add-addon web github-app        # several at once: add-addon web notify git-remote
+./setup.sh remove-addon web notify         # its env file stays for later
+```
+
+They read the settings `setup.sh` saved in `~/.config/agent-sandbox/<name>/setup.conf` of
+the sandbox user (instances set up before that: from the unit files), rewrite the units
+and keep every env file; then `systemctl --user daemon-reload` and restart the gateway.
+Pass `--sandbox-user` when it isn't `agent-sandbox`. Compose: remove the `-f` file to turn
+an add-on off.
 
 ## Common tasks
 
