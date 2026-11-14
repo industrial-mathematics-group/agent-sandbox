@@ -35,7 +35,7 @@ open pull requests, and keep merging to the default branch for yourself.
 
 ## Setup
 
-Quadlet: `setup.sh … --addon git-remote`, then fill in
+Quadlet: `setup.sh … --addon git-remote` (existing instance: `setup.sh add-addon <name> git-remote`), then fill in
 `~/.config/agent-sandbox/<name>/git-remote.env` and restart
 (`systemctl --user restart <name>-gateway`).
 

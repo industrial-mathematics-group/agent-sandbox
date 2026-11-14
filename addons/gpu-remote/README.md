@@ -36,7 +36,7 @@ Paths below are for the Quadlet setup with instance name `agent`
    gateway, runs a self-test (GPU visible, home hidden, no network) and prints a line
    for `~/.ssh/authorized_keys`. Add that line yourself. With `EGRESS_IP` (your VPN exit
    node's public IP, for example), the key only works from there (`from="…"`).
-3. Enable the add-on: `setup.sh … --addon gpu-remote` (Quadlet) or add
+3. Enable the add-on: `setup.sh … --addon gpu-remote` or, for an existing instance, `setup.sh add-addon <name> gpu-remote` (Quadlet) or add
    `-f ../../addons/gpu-remote/compose.yaml` (Compose). Fill in `gpu-remote.env`
    (`GPU_HOST`, `GPU_USER`, `GPU_PROJECT`), then restart. The gateway allowlists
    `GPU_HOST` by itself; if the server is on your LAN or tailnet, also set

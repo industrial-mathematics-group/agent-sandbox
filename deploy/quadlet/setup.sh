@@ -3,7 +3,15 @@
 # services), by default under a dedicated sandbox user. Run as YOUR normal user;
 # it uses sudo where needed.
 #
-#   ./setup.sh [options]
+#   ./setup.sh [options]                  set up (or rewrite) an instance
+#   ./setup.sh show NAME                  an instance's settings and add-ons
+#   ./setup.sh add-addon NAME ADDON...    add add-ons to an instance
+#   ./setup.sh remove-addon NAME ADDON... remove add-ons from an instance
+#
+# show/add-addon/remove-addon read the instance's settings (saved by setup.sh in
+# ~SANDBOX_USER/.config/agent-sandbox/NAME/setup.conf, or from its unit files) and keep
+# every env file. Pass --sandbox-user if it is not agent-sandbox; other options below
+# change that setting too. Host setup is skipped unless you pass --host-setup.
 #
 #   --name NAME          instance name (default: agent). One instance = one gateway +
 #                        one agent container; run several for several projects.
@@ -30,10 +38,14 @@
 #   --sandbox-user USER  run the containers as this user (default: agent-sandbox;
 #                        "$USER" = your own account, no isolation between you and it)
 #   --no-host-setup      skip subuids/linger/groups/ACL/SELinux steps
+#   --host-setup         do them (for show/add-addon/remove-addon)
 #   --dry-run            print what would be written, change nothing
 #
 # Example: a web project with a Vite dev server
 #   ./setup.sh --name web --flavor node-chromium --workspace ~/code/site --port 5173
+# Later: GitHub access for it, then the instance's settings
+#   ./setup.sh add-addon web github-app
+#   ./setup.sh show web
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -56,8 +68,93 @@ REGISTRY=${AGENT_SANDBOX_REGISTRY:-ghcr.io/OWNER}
 SANDBOX_USER=agent-sandbox
 HOST_SETUP=1
 DRY=0
+ALL_ADDONS=(claude-code codex gpu-remote slurm git-remote notify github-app)
 
-usage() { sed -n '2,37p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,48p' "$0" | sed 's/^# \{0,1\}//'; }
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# show / add-addon / remove-addon: start from an existing instance's settings
+# ---------------------------------------------------------------------------
+# Read the sandbox user's files (sudo unless it's you)
+as_sb_user() { if [ "$(id -un)" = "$SANDBOX_USER" ]; then "$@"; else sudo "$@"; fi; }
+sb_read() { as_sb_user cat "$1" 2>/dev/null || true; }   # empty if missing
+sb_exists() { as_sb_user test -e "$1"; }
+env_value() { sed -n "s/^$2=//p" <<<"$1" | tail -n 1; }   # env_value <text> <KEY>
+load_instance() {
+    local home units cfg c f gw
+    id "$SANDBOX_USER" >/dev/null 2>&1 || die "user $SANDBOX_USER does not exist (--sandbox-user?)"
+    home=$(getent passwd "$SANDBOX_USER" | cut -d: -f6)
+    units=$home/.config/containers/systemd
+    cfg=$home/.config/agent-sandbox/$NAME
+    sb_exists "$units/$NAME.container" \
+        || die "no instance '$NAME' for user $SANDBOX_USER ($units/$NAME.container is missing; --sandbox-user?)"
+    if sb_exists "$cfg/setup.conf"; then
+        SETTINGS_FROM=$cfg/setup.conf
+        while IFS='=' read -r k v; do
+            case "$k" in
+                FLAVOR|WORKSPACE|NET|MODE|PROFILES|GPU|CLAUDE_CONFIG|CODEX_CONFIG|MEMORY|CPUS|REGISTRY)
+                    printf -v "$k" '%s' "$v" ;;
+                PORTS)  read -ra PORTS <<<"$v" ;;
+                ADDONS) read -ra ADDONS <<<"$v" ;;
+            esac
+        done < <(sb_read "$cfg/setup.conf")
+    else
+        # Set up before setup.sh saved its settings: read them back from the units
+        SETTINGS_FROM="the unit files in $units"
+        c=$(sb_read "$units/$NAME.container")
+        f=$(sed -n 's/^Image=//p' <<<"$c" | head -n 1)        # REGISTRY/agent-sandbox:FLAVOR
+        REGISTRY=${f%/agent-sandbox:*}; FLAVOR=${f##*:}
+        WORKSPACE=$(sed -n 's|^Volume=\(.*\):/workspace$|\1|p' <<<"$c" | head -n 1)
+        f=$(grep -o -- '--memory=[^ ]*' <<<"$c" | head -n 1); [ -z "$f" ] || MEMORY=${f#*=}
+        f=$(grep -o -- '--cpus=[^ ]*' <<<"$c" | head -n 1);   [ -z "$f" ] || CPUS=${f#*=}
+        sb_exists "$units/$NAME-gateway.container.d/10-tailscale.conf" && NET=tailscale
+        for f in amd nvidia; do sb_exists "$units/$NAME.container.d/10-gpu-$f.conf" && GPU=$f; done
+        ADDONS=()
+        for f in "${ALL_ADDONS[@]}"; do
+            sb_exists "$units/$NAME-gateway.container.d/50-addon-$f.conf" && ADDONS+=("$f")
+        done
+        # (an instance from before Claude Code was an add-on mounts it in NAME.container)
+        f=$(sb_read "$units/$NAME.container.d/20-claude-code.conf"; sb_read "$units/$NAME.container")
+        f=$(printf '%s\n' "$f" \
+            | sed -n 's|^Volume=\(.*\):/home/agent/\.claude\(:z\)\{0,1\}$|\1|p' | head -n 1)
+        [ -z "$f" ] || CLAUDE_CONFIG=${f/#%h/$home}
+        f=$(sb_read "$units/$NAME.container.d/21-codex.conf" \
+            | sed -n 's|^Volume=\(.*\):/home/agent/\.codex\(:z\)\{0,1\}$|\1|p' | head -n 1)
+        [ -z "$f" ] || CODEX_CONFIG=${f/#%h/$home}
+        gw=$(sb_read "$cfg/gateway.env")
+        read -ra PORTS <<<"$(env_value "$gw" GATEWAY_INBOUND_PORTS | tr ',' ' ')"
+    fi
+    # gateway.env is never rewritten, so it has the mode and profiles in effect
+    gw=$(sb_read "$cfg/gateway.env")
+    if [ -n "$gw" ]; then
+        MODE=$(env_value "$gw" GATEWAY_MODE); MODE=${MODE:-standard}
+        PROFILES=$(env_value "$gw" GATEWAY_PROFILES)
+    fi
+}
+
+CMD=setup
+CMD_ADDONS=()
+case "${1:-}" in
+    show|add-addon|remove-addon)
+        CMD=$1; shift
+        [ $# -gt 0 ] && [[ "$1" != -* ]] || { echo "usage: $0 $CMD NAME$([ "$CMD" = show ] || echo ' ADDON...') [options] (see --help)" >&2; exit 2; }
+        NAME=$1; shift
+        while [ $# -gt 0 ] && [[ "$1" != -* ]]; do CMD_ADDONS+=("$1"); shift; done
+        if [ "$CMD" = show ]; then [ ${#CMD_ADDONS[@]} -eq 0 ] || die "show takes only the instance name"
+        else [ ${#CMD_ADDONS[@]} -gt 0 ] || die "$CMD: which add-on? (${ALL_ADDONS[*]})"; fi
+        # The sandbox user says where the instance lives, so it comes first
+        args=("$@")
+        for i in "${!args[@]}"; do
+            [ "${args[$i]}" = --sandbox-user ] && SANDBOX_USER=${args[$((i + 1))]:-}
+        done
+        [[ "$NAME" =~ ^[a-z][a-z0-9-]{0,30}$ ]] || die "bad instance name $NAME"
+        load_instance
+        HOST_SETUP=0   # done when the instance was set up
+        ;;
+esac
+LOADED_NAME=$NAME
+
 while [ $# -gt 0 ]; do
     case "$1" in
         --name)         NAME=$2; shift 2 ;;
@@ -76,21 +173,44 @@ while [ $# -gt 0 ]; do
         --registry)     REGISTRY=$2; shift 2 ;;
         --sandbox-user) SANDBOX_USER=$2; shift 2 ;;
         --no-host-setup) HOST_SETUP=0; shift ;;
+        --host-setup)   HOST_SETUP=1; shift ;;
         --dry-run)      DRY=1; shift ;;
         -h|--help)      usage; exit 0 ;;
         *)              echo "unknown option: $1 (see --help)" >&2; exit 2 ;;
     esac
 done
 
-die() { echo "ERROR: $*" >&2; exit 1; }
+[ "$CMD" = setup ] || [ "$NAME" = "$LOADED_NAME" ] || die "$CMD: give the instance name only once, not also as --name"
+for a in "${CMD_ADDONS[@]}"; do
+    case " ${ALL_ADDONS[*]} " in *" $a "*) ;; *) die "unknown add-on $a (${ALL_ADDONS[*]})" ;; esac
+done
+case "$CMD" in
+    add-addon)
+        for a in "${CMD_ADDONS[@]}"; do
+            case " ${ADDONS[*]} " in *" $a "*) echo "NOTE: '$NAME' has $a already; its files are refreshed." ;; esac
+        done
+        ADDONS+=("${CMD_ADDONS[@]}") ;;
+    remove-addon)
+        kept=()
+        for a in "${ADDONS[@]}"; do
+            case " ${CMD_ADDONS[*]} " in *" $a "*) ;; *) kept+=("$a") ;; esac
+        done
+        for a in "${CMD_ADDONS[@]}"; do
+            case " ${ADDONS[*]} " in *" $a "*) ;; *) echo "NOTE: '$NAME' has no $a add-on." ;; esac
+        done
+        case " ${kept[*]} " in
+            *" claude-code "*|*" codex "*) ;;
+            *) die "'$NAME' would have no coding agent left; add codex or claude-code first (add-addon)" ;;
+        esac
+        ADDONS=("${kept[@]}") ;;
+esac
 [[ "$NAME" =~ ^[a-z][a-z0-9-]{0,30}$ ]] || die "--name: lowercase letters, digits and '-' only"
 case "$FLAVOR" in minimal|node|node-chromium|python|python-gui|julia|julia-gui|octave|octave-gui|full|full-rocm) ;; *) die "unknown flavor $FLAVOR" ;; esac
 case "$NET" in plain|tailscale) ;; *) die "--net must be plain or tailscale" ;; esac
 case "$MODE" in standard|strict|open) ;; *) die "--mode must be standard, strict or open" ;; esac
 case "$GPU" in ""|amd|nvidia) ;; *) die "--gpu must be amd or nvidia" ;; esac
 for a in "${ADDONS[@]}"; do
-    case "$a" in claude-code|codex|gpu-remote|slurm|git-remote|notify|github-app) ;;
-        *) die "unknown add-on $a (claude-code, codex, gpu-remote, slurm, git-remote, notify, github-app)" ;; esac
+    case " ${ALL_ADDONS[*]} " in *" $a "*) ;; *) die "unknown add-on $a (${ALL_ADDONS[*]})" ;; esac
 done
 # A sandbox without a coding agent is rarely what you want: Claude Code by default
 case " ${ADDONS[*]} " in
@@ -144,6 +264,42 @@ CODEX_CONFIG=${CODEX_CONFIG:-$SB_HOME/.config/agent-sandbox/codex}
 # volumes need none. In units, the sandbox user's home is written as %h.
 mount_src() { case "$1" in /*) printf '%s' "${1/#$SB_HOME/%h}" ;; *) printf '%s' "$1" ;; esac; }
 mount_opts() { case "$1" in /*) printf ':z' ;; esac; }
+
+# The setup.sh command line for these settings (shown by `show`)
+setup_cmdline() {
+    local out="./setup.sh --name $NAME --registry $REGISTRY --flavor $FLAVOR" p a
+    [ "$WORKSPACE" = "/var/srv/agent-sandbox/$NAME" ] || out+=" --workspace $WORKSPACE"
+    [ "$NET" = plain ] || out+=" --net $NET"
+    [ "$MODE" = standard ] || out+=" --mode $MODE"
+    out+=" --profiles '$PROFILES'"
+    for p in "${PORTS[@]}"; do out+=" --port $p"; done
+    [ -z "$GPU" ] || out+=" --gpu $GPU"
+    for a in "${ADDONS[@]}"; do out+=" --addon $a"; done
+    if has_addon claude-code && [ "$CLAUDE_CONFIG" != agent-sandbox-claude ]; then out+=" --claude-config $CLAUDE_CONFIG"; fi
+    if has_addon codex && [ "$CODEX_CONFIG" != "$SB_HOME/.config/agent-sandbox/codex" ]; then out+=" --codex-config $CODEX_CONFIG"; fi
+    out+=" --memory $MEMORY --cpus $CPUS"
+    [ "$SANDBOX_USER" = agent-sandbox ] || out+=" --sandbox-user $SANDBOX_USER"
+    printf '%s\n' "$out"
+}
+if [ "$CMD" = show ]; then
+    echo "Instance '$NAME' of $SANDBOX_USER (settings from $SETTINGS_FROM)"
+    echo "  image       $IMAGE$( [ "$GPU" = amd ] && echo " ($IMAGE_ROCM with the GPU)")"
+    echo "  workspace   $WORKSPACE"
+    echo "  network     $NET, gateway mode $MODE, profiles base${PROFILES:+,$PROFILES}"
+    echo "  ports       ${PORTS[*]:-(none)}"
+    echo "  gpu         ${GPU:-(none)}"
+    echo "  limits      memory $MEMORY, cpus $CPUS"
+    echo "  add-ons     ${ADDONS[*]:-(none)}"
+    if has_addon claude-code; then echo "  ~/.claude   $CLAUDE_CONFIG"; fi
+    if has_addon codex; then echo "  ~/.codex    $CODEX_CONFIG"; fi
+    echo "  config      ${CONFIG_DIR/#$SB_HOME/\~}/ (gateway.env, extra.list$(printf ', %s.env' "${ADDONS[@]}"))"
+    echo
+    echo "Same instance again (keeps the env files):"
+    echo "  $(setup_cmdline)"
+    echo "Add or remove an add-on: ./setup.sh add-addon $NAME ADDON  /  ./setup.sh remove-addon $NAME ADDON"
+    echo "Add-ons: ${ALL_ADDONS[*]}"
+    exit 0
+fi
 
 # Run as the sandbox user's file owner (sudo unless it's you)
 run() { if [ "$DRY" = 1 ]; then echo "  + $*"; else "$@"; fi; }
@@ -336,6 +492,27 @@ if [ ${#dropins[@]} -gt 0 ]; then
     done
 fi
 
+# Drop-ins of what this instance no longer has (an add-on removed, GPU or network
+# changed). Env files stay.
+remove_file() {
+    exists "$1" || return 0
+    echo "   removing $1"
+    if [ "$DRY" = 1 ]; then return; fi
+    if [ "$SAME_USER" = 1 ]; then rm -f "$1"; else sudo rm -f "$1"; fi
+}
+for a in "${ALL_ADDONS[@]}"; do
+    has_addon "$a" && continue
+    remove_file "$UNIT_DIR/$NAME-gateway.container.d/50-addon-$a.conf"
+    for f in "$REPO/addons/$a/quadlet/"*.conf; do
+        [ -f "$f" ] && remove_file "$UNIT_DIR/$NAME.container.d/$(basename "$f")"
+    done
+    for f in "$REPO/addons/$a/quadlet/gateway/"*.conf; do
+        [ -f "$f" ] && remove_file "$UNIT_DIR/$NAME-gateway.container.d/$(basename "$f")"
+    done
+done
+for g in amd nvidia; do [ "$GPU" = "$g" ] || remove_file "$UNIT_DIR/$NAME.container.d/10-gpu-$g.conf"; done
+[ "$NET" = tailscale ] || remove_file "$UNIT_DIR/$NAME-gateway.container.d/10-tailscale.conf"
+
 echo "== Config -> $CONFIG_DIR"
 render "$HERE/gateway.env.example" "$TMP/gateway.env"
 sed -i "s/^GATEWAY_MODE=.*/GATEWAY_MODE=$MODE/" "$TMP/gateway.env"
@@ -350,6 +527,43 @@ if ! exists "$CONFIG_DIR/extra.list"; then
     printf '# Extra allowed hosts for instance %s, one per line ("*.example.com" = with subdomains)\n' "$NAME" > "$TMP/extra.list"
     install_file 644 "$TMP/extra.list" "$CONFIG_DIR/extra.list"
 fi
+# This run's settings, for show/add-addon/remove-addon (rewritten every run)
+{
+    echo "# Written by setup.sh, read by setup.sh show/add-addon/remove-addon (not by the"
+    echo "# containers). Change settings with setup.sh rather than here."
+    for k in FLAVOR REGISTRY WORKSPACE NET MODE PROFILES GPU MEMORY CPUS CLAUDE_CONFIG CODEX_CONFIG; do
+        printf '%s=%s\n' "$k" "${!k}"
+    done
+    echo "PORTS=${PORTS[*]}"
+    echo "ADDONS=${ADDONS[*]}"
+} > "$TMP/setup.conf"
+install_file 644 "$TMP/setup.conf" "$CONFIG_DIR/setup.conf"
+
+addon_hint() {   # what to fill in for an add-on
+    local a=$1 c=${CONFIG_DIR/#$SB_HOME/\~}
+    if ssh_addon "$a"; then echo "  nano $c/$a.env   # + SSH key in $c/${a%%-*}-ssh/ (addons/$a/README.md)"
+    elif [ "$a" = codex ]; then echo "  # Codex login: copy your auth.json into ${CODEX_CONFIG/#$SB_HOME/\~}/ (addons/codex/README.md)"
+    elif [ "$a" = github-app ]; then echo "  nano $c/github-app.env   # App ID, organization; App private key -> github-app.pem (addons/github-app/README.md)"
+    elif [ "$a" != claude-code ]; then echo "  nano $c/$a.env   # host, token (addons/$a/README.md)"; fi
+}
+
+if [ "$CMD" != setup ]; then
+    added=(); [ "$CMD" = add-addon ] && added=("${CMD_ADDONS[@]}")
+    cat -s <<EOF
+
+Done. Add-ons of '$NAME' now: ${ADDONS[*]}
+Next steps, as $SANDBOX_USER:
+
+$( [ "$SAME_USER" = 0 ] && echo "  sudo machinectl shell $SANDBOX_USER@" )
+$( for a in "${added[@]}"; do addon_hint "$a"; done )
+  systemctl --user daemon-reload
+  systemctl --user restart $NAME-gateway            # restarts $NAME too
+$( case " ${added[*]} " in *" claude-code "*) echo "  podman exec -it -u agent $NAME claude              # first time: log in" ;; esac )
+$( case " ${added[*]} " in *" codex "*) echo "  podman exec -it -u agent $NAME codex               # or: codex login --device-auth" ;; esac )
+$( [ "$CMD" = remove-addon ] && echo "The removed add-ons' env files stay in ${CONFIG_DIR/#$SB_HOME/\~}/; add-addon reuses them." )
+EOF
+    exit 0
+fi
 
 cat <<EOF
 
@@ -358,12 +572,7 @@ Done. Next steps, as $SANDBOX_USER:
 $( [ "$SAME_USER" = 0 ] && echo "  sudo machinectl shell $SANDBOX_USER@" )
   nano ${CONFIG_DIR/#$SB_HOME/\~}/gateway.env       # mode, profiles$( [ "$NET" = tailscale ] && echo ', TS_AUTHKEY, TS_EXIT_NODE' )
   nano ${CONFIG_DIR/#$SB_HOME/\~}/extra.list        # your own allowed hosts
-$( for a in "${ADDONS[@]}"; do
-       if ssh_addon "$a"; then echo "  nano ${CONFIG_DIR/#$SB_HOME/\~}/$a.env   # + SSH key in ${CONFIG_DIR/#$SB_HOME/\~}/${a%%-*}-ssh/ (addons/$a/README.md)"
-       elif [ "$a" = codex ]; then echo "  # Codex login: copy your auth.json into ${CODEX_CONFIG/#$SB_HOME/\~}/ (addons/codex/README.md)"
-       elif [ "$a" = github-app ]; then echo "  nano ${CONFIG_DIR/#$SB_HOME/\~}/github-app.env   # App ID, organization; App private key -> github-app.pem (addons/github-app/README.md)"
-       elif [ "$a" != claude-code ]; then echo "  nano ${CONFIG_DIR/#$SB_HOME/\~}/$a.env   # host, token (addons/$a/README.md)"; fi
-     done )
+$( for a in "${ADDONS[@]}"; do addon_hint "$a"; done )
 $( case "$IMAGE" in localhost/*) ;; *) echo "  podman login --authfile ~/.config/containers/auth.json ${IMAGE%%/*}   # private packages: once";; esac )
   /usr/libexec/podman/quadlet -dryrun -user | less   # check the generated units
   systemctl --user daemon-reload
