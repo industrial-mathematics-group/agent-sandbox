@@ -114,7 +114,7 @@ fi
 /usr/local/bin/assemble-agent-md
 
 # ---------------------------------------------------------------------------
-# 4. Layer hooks (e.g. Xvfb from layers/xvfb). Sourced as root; they start
+# 4. Image hooks (e.g. Xvfb from the base). Sourced as root; they start
 #    their own processes with drop_to_agent. Add-ons can ship their own
 #    (/opt/agent-sandbox/addons/<name>/entrypoint.d/), e.g. claude-code and codex
 #    install their CLI, git-remote writes /etc/gitconfig, notify installs Claude
