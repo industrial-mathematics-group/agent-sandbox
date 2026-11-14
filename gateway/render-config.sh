@@ -29,7 +29,7 @@ LISTS=/etc/agent-sandbox/lists
 OUT=/run/agent-gateway
 MODE=${GATEWAY_MODE:-standard}
 PROFILES=${GATEWAY_PROFILES:-}
-EXTRA=${GATEWAY_EXTRA_DOMAINS:-${FIREWALL_EXTRA_DOMAINS:-}}   # old name still accepted
+EXTRA=${GATEWAY_EXTRA_DOMAINS:-}
 PROXY_PORT=${GATEWAY_PROXY_PORT:-3128}
 
 mkdir -p "$OUT"

@@ -9,7 +9,7 @@
 #   ./setup.sh remove-addon NAME ADDON... remove add-ons from an instance
 #
 # show/add-addon/remove-addon read the instance's settings (saved by setup.sh in
-# ~SANDBOX_USER/.config/agent-sandbox/NAME/setup.conf, or from its unit files) and keep
+# ~SANDBOX_USER/.config/agent-sandbox/NAME/setup.conf) and keep
 # every env file. Pass --sandbox-user if it is not agent-sandbox; other options below
 # change that setting too. Host setup is skipped unless you pass --host-setup.
 #
@@ -17,8 +17,7 @@
 #                        one agent container; run several for several projects.
 #   --flavor FLAVOR      image flavor: minimal node julia octave full (headless, all with
 #                        Python + uv), each also as FLAVOR-utils (+ virtual display,
-#                        Chromium), or full-rocm (default: full-utils). The old names
-#                        python, python-gui, julia-gui, octave-gui, node-chromium still work.
+#                        Chromium), or full-rocm (default: full-utils)
 #   --workspace DIR      host folder mounted as /workspace
 #                        (default: /var/srv/agent-sandbox/<name>)
 #   --net plain|tailscale   egress directly (default) or only via a Tailscale exit node
@@ -85,49 +84,24 @@ sb_read() { as_sb_user cat "$1" 2>/dev/null || true; }   # empty if missing
 sb_exists() { as_sb_user test -e "$1"; }
 env_value() { sed -n "s/^$2=//p" <<<"$1" | tail -n 1; }   # env_value <text> <KEY>
 load_instance() {
-    local home units cfg c f gw
+    local home units cfg gw
     id "$SANDBOX_USER" >/dev/null 2>&1 || die "user $SANDBOX_USER does not exist (--sandbox-user?)"
     home=$(getent passwd "$SANDBOX_USER" | cut -d: -f6)
     units=$home/.config/containers/systemd
     cfg=$home/.config/agent-sandbox/$NAME
     sb_exists "$units/$NAME.container" \
         || die "no instance '$NAME' for user $SANDBOX_USER ($units/$NAME.container is missing; --sandbox-user?)"
-    if sb_exists "$cfg/setup.conf"; then
-        SETTINGS_FROM=$cfg/setup.conf
-        while IFS='=' read -r k v; do
-            case "$k" in
-                FLAVOR|WORKSPACE|NET|MODE|PROFILES|GPU|CLAUDE_CONFIG|CODEX_CONFIG|MEMORY|CPUS|REGISTRY)
-                    printf -v "$k" '%s' "$v" ;;
-                PORTS)  read -ra PORTS <<<"$v" ;;
-                ADDONS) read -ra ADDONS <<<"$v" ;;
-            esac
-        done < <(sb_read "$cfg/setup.conf")
-    else
-        # Set up before setup.sh saved its settings: read them back from the units
-        SETTINGS_FROM="the unit files in $units"
-        c=$(sb_read "$units/$NAME.container")
-        f=$(sed -n 's/^Image=//p' <<<"$c" | head -n 1)        # REGISTRY/agent-sandbox:FLAVOR
-        REGISTRY=${f%/agent-sandbox:*}; FLAVOR=${f##*:}
-        WORKSPACE=$(sed -n 's|^Volume=\(.*\):/workspace$|\1|p' <<<"$c" | head -n 1)
-        f=$(grep -o -- '--memory=[^ ]*' <<<"$c" | head -n 1); [ -z "$f" ] || MEMORY=${f#*=}
-        f=$(grep -o -- '--cpus=[^ ]*' <<<"$c" | head -n 1);   [ -z "$f" ] || CPUS=${f#*=}
-        sb_exists "$units/$NAME-gateway.container.d/10-tailscale.conf" && NET=tailscale
-        for f in amd nvidia; do sb_exists "$units/$NAME.container.d/10-gpu-$f.conf" && GPU=$f; done
-        ADDONS=()
-        for f in "${ALL_ADDONS[@]}"; do
-            sb_exists "$units/$NAME-gateway.container.d/50-addon-$f.conf" && ADDONS+=("$f")
-        done
-        # (an instance from before Claude Code was an add-on mounts it in NAME.container)
-        f=$(sb_read "$units/$NAME.container.d/20-claude-code.conf"; sb_read "$units/$NAME.container")
-        f=$(printf '%s\n' "$f" \
-            | sed -n 's|^Volume=\(.*\):/home/agent/\.claude\(:z\)\{0,1\}$|\1|p' | head -n 1)
-        [ -z "$f" ] || CLAUDE_CONFIG=${f/#%h/$home}
-        f=$(sb_read "$units/$NAME.container.d/21-codex.conf" \
-            | sed -n 's|^Volume=\(.*\):/home/agent/\.codex\(:z\)\{0,1\}$|\1|p' | head -n 1)
-        [ -z "$f" ] || CODEX_CONFIG=${f/#%h/$home}
-        gw=$(sb_read "$cfg/gateway.env")
-        read -ra PORTS <<<"$(env_value "$gw" GATEWAY_INBOUND_PORTS | tr ',' ' ')"
-    fi
+    sb_exists "$cfg/setup.conf" \
+        || die "instance '$NAME' has no $cfg/setup.conf; set it up again with setup.sh and its options"
+    SETTINGS_FROM=$cfg/setup.conf
+    while IFS='=' read -r k v; do
+        case "$k" in
+            FLAVOR|WORKSPACE|NET|MODE|PROFILES|GPU|CLAUDE_CONFIG|CODEX_CONFIG|MEMORY|CPUS|REGISTRY)
+                printf -v "$k" '%s' "$v" ;;
+            PORTS)  read -ra PORTS <<<"$v" ;;
+            ADDONS) read -ra ADDONS <<<"$v" ;;
+        esac
+    done < <(sb_read "$cfg/setup.conf")
     # gateway.env is never rewritten, so it has the mode and profiles in effect
     gw=$(sb_read "$cfg/gateway.env")
     if [ -n "$gw" ]; then
@@ -208,25 +182,6 @@ case "$CMD" in
         ADDONS=("${kept[@]}") ;;
 esac
 [[ "$NAME" =~ ^[a-z][a-z0-9-]{0,30}$ ]] || die "--name: lowercase letters, digits and '-' only"
-# Old flavor names (Python moved into the base, Xvfb + Chromium into the -utils variants)
-case "$FLAVOR" in
-    python)        NEW_FLAVOR=minimal ;;
-    python-gui)    NEW_FLAVOR=minimal-utils ;;
-    node-chromium) NEW_FLAVOR=node-utils ;;
-    julia-gui)     NEW_FLAVOR=julia-utils ;;
-    octave-gui)    NEW_FLAVOR=octave-utils ;;
-    *)             NEW_FLAVOR= ;;
-esac
-OLD_FLAVOR=
-if [ -n "$NEW_FLAVOR" ]; then
-    OLD_FLAVOR=$FLAVOR
-    if [ "$CMD" = show ]; then
-        echo "NOTE: '$NAME' uses the old flavor name $FLAVOR, now $NEW_FLAVOR. The old tag still gets updates; the command below switches to $NEW_FLAVOR."
-    else
-        echo "NOTE: flavor $FLAVOR is now $NEW_FLAVOR; using that."
-    fi
-    FLAVOR=$NEW_FLAVOR
-fi
 case "${FLAVOR%-utils}" in minimal|node|julia|octave|full) ;; *) [ "$FLAVOR" = full-rocm ] || die "unknown flavor $FLAVOR" ;; esac
 case "$NET" in plain|tailscale) ;; *) die "--net must be plain or tailscale" ;; esac
 case "$MODE" in standard|strict|open) ;; *) die "--mode must be standard, strict or open" ;; esac
@@ -306,7 +261,7 @@ setup_cmdline() {
 }
 if [ "$CMD" = show ]; then
     echo "Instance '$NAME' of $SANDBOX_USER (settings from $SETTINGS_FROM)"
-    echo "  image       ${OLD_FLAVOR:+$REGISTRY/agent-sandbox:$OLD_FLAVOR (old name of }$IMAGE${OLD_FLAVOR:+)}$( [ "$GPU" = amd ] && echo " ($IMAGE_ROCM with the GPU)")"
+    echo "  image       $IMAGE$( [ "$GPU" = amd ] && echo " ($IMAGE_ROCM with the GPU)")"
     echo "  workspace   $WORKSPACE"
     echo "  network     $NET, gateway mode $MODE, profiles base${PROFILES:+,$PROFILES}"
     echo "  ports       ${PORTS[*]:-(none)}"

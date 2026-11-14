@@ -98,14 +98,6 @@ if compgen -G '/opt/agent-sandbox/addons/*' >/dev/null && [ "${#addon_bins[@]}" 
 fi
 unset addon_bins
 
-# Claude Code used to be part of the image; it is the claude-code add-on now. An
-# instance set up before still mounts its volume but not the add-on.
-if [ ! -d /opt/agent-sandbox/addons/claude-code ] && mountpoint -q /opt/claude-code 2>/dev/null; then
-    echo "WARN: Claude Code is an add-on now and this instance doesn't mount it, so \`claude\` is" \
-         "not installed. Rerun deploy/quadlet/setup.sh with your options (it adds the add-on by" \
-         "default), or add -f ../../addons/claude-code/compose.yaml (see addons/claude-code/README.md)." >&2
-fi
-
 # ---------------------------------------------------------------------------
 # 3. Agent notes: image fragments + mounted add-on fragments, assembled into the
 #    root-owned /etc/agent-sandbox/AGENTS.md before the hooks, which hand it to
