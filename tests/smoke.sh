@@ -8,6 +8,9 @@
 #                                           it downloads ~170 MB)
 #
 # Always with the claude-code add-on. Without codex, OpenAI must be unreachable.
+# Also with the github-app add-on and a throwaway key: GitHub refuses its tokens, but
+# the answer proves the gateway's broker runs, signs and reaches GitHub, and that the
+# key stays out of the agent.
 set -euo pipefail
 cd "$(dirname "$0")/../deploy/compose"
 
@@ -20,18 +23,20 @@ export SANDBOX_NAME=smoke FLAVOR="$FLAVOR$TAG_SUFFIX" REGISTRY GATEWAY_TAG="${GA
 SMOKE_CODEX=${SMOKE_CODEX:-$([ "$FLAVOR" = minimal ] && echo 1 || echo 0)}
 cp gateway.env.example gateway.env; cp sandbox.env.example sandbox.env; : > extra.list
 cp ../../addons/claude-code/claude-code.env.example claude-code.env
-files=(-f compose.yaml -f ../../addons/claude-code/compose.yaml)
+openssl genrsa -out github-app.pem 2048 2>/dev/null
+printf 'GITHUB_APP_ID=1\nGITHUB_APP_INSTALLATION_ID=1\n' > github-app.env
+files=(-f compose.yaml -f ../../addons/claude-code/compose.yaml -f ../../addons/github-app/compose.yaml)
 if [ "$SMOKE_CODEX" = 1 ]; then
     cp ../../addons/codex/codex.env.example codex.env
     CODEX_CONFIG=$(mktemp -d); chmod 777 "$CODEX_CONFIG"; export CODEX_CONFIG
     files+=(-f ../../addons/codex/compose.yaml)
 fi
 # Add-on files are read as agent (uid 1000) inside
-chmod 644 ./*.env
+chmod 644 ./*.env github-app.pem   # throwaway key; a real one stays mode 600/400
 chmod -R a+rX ../../addons
 dc() { docker compose -p smoke "${files[@]}" "$@"; }
 show_logs() { echo "--- compose ps"; dc ps -a || true; echo "--- compose logs"; dc logs --no-color | tail -"${1:-50}" || true; }
-cleanup() { dc down -v >/dev/null 2>&1 || true; rm -f gateway.env sandbox.env extra.list claude-code.env codex.env; }
+cleanup() { dc down -v >/dev/null 2>&1 || true; rm -f gateway.env sandbox.env extra.list claude-code.env codex.env github-app.env github-app.pem; }
 trap cleanup EXIT
 
 if ! dc up -d; then
@@ -53,7 +58,8 @@ check() {   # check <description> <expected: ok|blocked> <command...>
     if [ "$got" = "$want" ]; then echo "PASS  $what ($got)"; else echo "FAIL  $what (expected $want, got $got)"; fail=1; fi
 }
 check "Anthropic API via proxy"      ok      curl -s -o /dev/null --max-time 15 https://api.anthropic.com
-check "GitHub via proxy"             ok      curl -sf -o /dev/null --max-time 15 https://api.github.com/zen
+# Any HTTP answer: unauthenticated API calls from shared runner IPs hit rate limits (403)
+check "GitHub via proxy"             ok      curl -s -o /dev/null --max-time 15 https://api.github.com/zen
 check "non-allowlisted host"         blocked curl -sf -o /dev/null --max-time 15 https://example.com
 check "direct connection (no proxy)" blocked curl --noproxy '*' -s -o /dev/null --max-time 8 https://1.1.1.1
 check "LAN / metadata address"       blocked curl -sf -o /dev/null --max-time 8 http://169.254.169.254
@@ -71,6 +77,12 @@ if [ "$SMOKE_CODEX" = 1 ]; then
 else
     check "OpenAI without codex add-on"  blocked curl -sf -o /dev/null --max-time 15 https://api.openai.com
 fi
+check "github-app broker answers"    ok      sh -c 'curl -s --noproxy "*" --max-time 60 http://127.0.0.1:3129/info | jq -e .host'
+# GitHub's answer to the throwaway key's JWT, not a proxy or network error
+echo "      broker /token: $(dc exec -T -u agent agent curl -s --noproxy '*' --max-time 60 http://127.0.0.1:3129/token 2>&1 | head -c 400)"
+check "github-app broker reaches GitHub" ok  sh -c 'curl -s --noproxy "*" --max-time 60 http://127.0.0.1:3129/token | jq -e ".error | test(\"access_tokens: .\") and (test(\"curl|CONNECT|resolve\") | not)"'
+check "github-app key not in agent"  blocked sh -c 'test -e /etc/agent-sandbox/secrets || test -e /var/lib/github-app'
+check "github-app credential helper" ok      sh -c 'git config --system --get-all credential.https://github.com.helper | grep -q github-app'
 
 if [ "$fail" = 1 ]; then
     show_logs

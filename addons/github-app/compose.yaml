@@ -1,0 +1,16 @@
+# github-app add-on:
+#   docker compose -f compose.yaml -f ../../addons/github-app/compose.yaml up -d
+# Paths are relative to deploy/compose (the first compose file's folder).
+# Only the gateway gets github-app.env and the private key, and its root has no
+# CAP_DAC_OVERRIDE, so it must own the key: rootful Docker `sudo chown root:root
+# github-app.pem && sudo chmod 400 github-app.pem`; rootless Podman with
+# compose.podman.yaml: your own file, mode 600. github-app.env holds no secret
+# (chmod 644 is fine). The agent only gets the client.
+services:
+  gateway:
+    volumes:
+      - ${GITHUB_APP_ENV:-./github-app.env}:/etc/agent-sandbox/addons/github-app.env:ro
+      - ${GITHUB_APP_KEY:-./github-app.pem}:/etc/agent-sandbox/secrets/github-app.pem:ro
+  agent:
+    volumes:
+      - ../../addons/github-app:/opt/agent-sandbox/addons/github-app:ro

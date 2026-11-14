@@ -69,7 +69,7 @@ Gateway: `ghcr.io/OWNER/agent-sandbox-gateway:latest` (plain) and `:tailscale`.
 | general add-ons (image layers) | `layers/xvfb`, `layers/chromium`, `layers/rocm` | Virtual X display + Mesa · headless Chromium · ROCm runtime |
 | final step | `images/final` | Proxy settings, environment notes for the agent (last step of every image) |
 | gateway | `gateway` | Firewall, proxy, allowlists (`gateway/lists/*.list`) |
-| specific add-ons | `addons/claude-code`, `addons/codex`, `addons/gpu-local`, `addons/gpu-remote`, `addons/slurm`, `addons/git-remote`, `addons/notify` | Claude Code · Codex · local GPU drop-ins · remote GPU gateway · Slurm gateway · Git hosting account · notifications |
+| specific add-ons | `addons/claude-code`, `addons/codex`, `addons/gpu-local`, `addons/gpu-remote`, `addons/slurm`, `addons/git-remote`, `addons/github-app`, `addons/notify` | Claude Code · Codex · local GPU drop-ins · remote GPU gateway · Slurm gateway · Git hosting account · GitHub as a GitHub App · notifications |
 | deployment | `deploy/quadlet`, `deploy/compose` | Quadlet templates + `setup.sh` · Compose files |
 
 Each layer adds a fragment to the environment notes (`/etc/agent-sandbox/AGENTS.md`), and
@@ -246,6 +246,7 @@ own chain in `build.sh`. Specific add-ons (`addons/`) are switched on per instan
 | [gpu-remote](addons/gpu-remote/README.md) | Julia tests on a remote GPU server, via a forced-command SSH gateway + bubblewrap | `--addon gpu-remote` / `addons/gpu-remote/compose.yaml` |
 | [slurm](addons/slurm/README.md) | Jobs on an HPC cluster with capped resources, via a forced-command SSH gateway | `--addon slurm` / `addons/slurm/compose.yaml` |
 | [git-remote](addons/git-remote/README.md) | One GitHub / Forgejo / GitLab account: host, service and token; git push/pull over HTTPS and API calls | `--addon git-remote` / `addons/git-remote/compose.yaml` |
+| [github-app](addons/github-app/README.md) | GitHub as your organization's GitHub App: the private key stays in the gateway, which hands the agent 1-hour installation tokens for git (credential helper) and `gh` | `--addon github-app` / `addons/github-app/compose.yaml` |
 | [notify](addons/notify/README.md) | Push notifications (ntfy, Gotify, Discord, Slack, webhook) when Claude needs you, plus a `notify` command | `--addon notify` / `addons/notify/compose.yaml` |
 
 A specific add-on mounts its client (`bin/`), helpers for its hooks (`libexec/`), its
@@ -270,8 +271,10 @@ add-on off.
 - **Add hosts:** `extra.list` (one per line) or `GATEWAY_EXTRA_DOMAINS`, then restart the
   gateway.
 - **Git push:** no credentials are in the container by default. Commit inside, push from
-  the host, or enable the [git-remote](addons/git-remote/README.md) add-on with a
-  fine-grained token scoped to the repositories the agent should push to.
+  the host, or enable an add-on: [github-app](addons/github-app/README.md) for GitHub
+  (recommended: an org-owned App, short-lived tokens, the key stays in the gateway) or
+  [git-remote](addons/git-remote/README.md) with a fine-grained token scoped to the
+  repositories the agent should push to (Forgejo, GitLab, or GitHub).
 - **Update:** images: Quadlet automatically via `podman-auto-update.timer` (`podman
   auto-update` by hand), Compose `docker compose pull && docker compose up -d`. Claude
   Code and Codex: restart the container (a channel is re-checked after a day; delete
@@ -327,7 +330,8 @@ Start with the gateway log (`journalctl --user -u <name>-gateway -e` or
   allow. Dev servers, Bonito and ocp_vscode have no authentication.
 - Anything in the agent's environment (`sandbox.env`, e.g. `ANTHROPIC_API_KEY`) is
   readable by the agent, and so are its own logins (`~/.claude`, `~/.codex/auth.json`) and
-  the tokens of the git-remote and notify add-ons.
+  the tokens of the git-remote and notify add-ons. The github-app add-on keeps its key in
+  the gateway, but the agent can get (and use) its one-hour tokens while it runs.
 
 ## License
 
