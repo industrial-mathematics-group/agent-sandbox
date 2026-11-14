@@ -42,7 +42,9 @@ the agent.
 Their `<name>.container` still mounts `~/.claude` and `/opt/claude-code` itself, and
 after the image update `claude` is missing (the agent log says so). Rerun `setup.sh` with
 the options you used before; it rewrites the units with the add-on and keeps your env
-files. If `~/.claude` was a host folder, pass it as `--claude-config`, e.g.
+files. `setup.sh add-addon <name> claude-code` does that without retyping them (it reads
+the options back from the units, a host folder for `~/.claude` included). By hand, if
+`~/.claude` was a host folder, pass it as `--claude-config`, e.g.
 
 ```bash
 ./setup.sh --name claude-julia --flavor julia-gui --net tailscale --workspace /srv/claude/projects \
