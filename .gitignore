@@ -6,3 +6,6 @@ deploy/compose/extra.list
 deploy/compose/workspace/
 deploy/compose/*-ssh/
 deploy/compose/codex/
+
+# Built documentation (zensical build)
+site/

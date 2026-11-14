@@ -1,0 +1,47 @@
+# Builds the documentation site (Zensical, docs/ + zensical.toml) and publishes it to
+# GitHub Pages: https://<owner>.github.io/agent-sandbox/
+# Pull requests only build it, so broken pages show up before the merge.
+# One-time setup: repository Settings -> Pages -> Source: "GitHub Actions".
+name: docs
+
+on:
+  push:
+    branches: [main]
+    paths: [docs/**, zensical.toml, .github/workflows/docs.yml]
+  pull_request:
+    paths: [docs/**, zensical.toml, .github/workflows/docs.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with: { python-version: "3.x" }
+      - run: pip install zensical==0.1.1
+      - run: zensical build --clean
+      - uses: actions/upload-pages-artifact@v5
+        if: github.event_name != 'pull_request'
+        with: { path: site }
+
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/deploy-pages@v5
+        id: deployment
