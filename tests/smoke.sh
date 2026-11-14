@@ -17,6 +17,7 @@ cd "$(dirname "$0")/../deploy/compose"
 FLAVOR=${1:-minimal}
 REGISTRY=${2:-localhost}
 TAG_SUFFIX=${TAG_SUFFIX:-}
+KIND=$FLAVOR   # FLAVOR gets the tag suffix below (CI: -amd64)
 WORKSPACE=$(mktemp -d)
 chmod 777 "$WORKSPACE"
 export SANDBOX_NAME=smoke FLAVOR="$FLAVOR$TAG_SUFFIX" REGISTRY GATEWAY_TAG="${GATEWAY_TAG:-latest}" WORKSPACE PORT_1=3999 PORTS=3999 CPUS=1 MEMORY=4g   # limits that fit any runner
@@ -81,7 +82,7 @@ fi
 check "python3 + venv"               ok      sh -c 'python3 -m venv /tmp/smoke-venv && /tmp/smoke-venv/bin/python -c "import sys"'
 check "uv"                           ok      uv --version
 check "uv cache in ~/.cache"         ok      sh -c 'test "$(uv cache dir)" = /home/agent/.cache/uv'
-case "$FLAVOR" in
+case "$KIND" in
     *-utils|full-rocm)
         check "Xvfb display running"   ok  sh -c 'test -S /tmp/.X11-unix/X${DISPLAY#:}'
         check "OpenGL on the display"  ok  sh -c 'glxinfo -B | grep -Eq "OpenGL core profile version string: ([4-9]|3\.[3-9])"'
@@ -89,7 +90,7 @@ case "$FLAVOR" in
     *)
         check "headless: no Xvfb"      blocked sh -c 'command -v Xvfb' ;;
 esac
-case "${FLAVOR%-utils}" in
+case "${KIND%-utils}" in
     full*)   check "Julia"   ok  julia --startup-file=no -e 'exit(0)'
              check "Node"    ok  node --version ;;
     julia)   check "Julia"   ok  julia --startup-file=no -e 'exit(0)' ;;
