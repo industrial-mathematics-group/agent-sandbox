@@ -8,8 +8,8 @@ Sandboxed containers for running Claude Code or OpenAI Codex (and similar coding
 with `--dangerously-skip-permissions` / `--yolo`, without handing them your machine or your
 network.
 
-- **Small images per language:** node, julia, octave, or all of them, each optionally
-  with headless Chromium or ROCm. Python (uv) and a virtual display are in every image.
+- **Small images per language:** node, julia, octave, or all of them, all with Python
+  (uv). Each comes headless or as `-utils` with a virtual display and headless Chromium.
 - **Network through a gateway:** the agent container has no network of its own. It
   shares the namespace of a gateway sidecar that runs the firewall and a filtering
   proxy, so the agent can't change the rules. Only allowlisted hosts get through; LAN,
@@ -46,47 +46,48 @@ All images: `ghcr.io/OWNER/agent-sandbox:<flavor>` (also `<flavor>-YYYYMMDD`),
 `linux/amd64` and `linux/arm64`. The packages can stay private to your organization, see
 [Private registry](#private-registry).
 
-| Flavor | Chain | For |
-|---|---|---|
-| `minimal` | base | Python projects, CAD (build123d), plotting, plain repo work, scripting |
-| `minimal-chromium` | base + chromium | The same with browser checks |
-| `node` | base + node | Websites, JS/TS tooling |
-| `node-chromium` | base + node + chromium | Web dev with Playwright / browser checks |
-| `julia` | base + julia | Julia packages, GLMakie |
-| `julia-chromium` | base + julia + chromium | WGLMakie tests (Electron.jl) |
-| `octave` | base + octave | MATLAB-style code with GNU Octave (+ signal, statistics, control, optim, io, image, symbolic), plots through the virtual display |
-| `full` | base + node + julia + chromium | Everything |
-| `full-rocm` | full + rocm (amd64) | AMDGPU.jl, PyTorch-ROCm |
+Two tiers: the headless **core** images are base (shell tools, build tools, Python 3 +
+uv) plus a language. Each also comes as **`-utils`**, with the utilities layer on top: a
+virtual display (Xvfb + Mesa software OpenGL) and headless Chromium. Stay headless and
+you only pull the core; a `-utils` image adds one layer on top of the same core, so a
+host running both stores the core once. New general tools go into the utilities layer,
+not into another variant.
 
-The base already has Python (`python3` + uv) and the virtual display (Xvfb + Mesa), so
-agents can script and test in Python in every box, and a host that runs several flavors
-stores them once.
+| Core flavor | Chain | For | `-utils` adds |
+|---|---|---|---|
+| `minimal` | base | Python projects, scripting, plain repo work | CAD (build123d), plotting, browser checks |
+| `node` | base + node | Websites, JS/TS tooling | Playwright / browser checks |
+| `julia` | base + julia | Julia packages, CairoMakie | GLMakie, WGLMakie tests (Electron.jl) |
+| `octave` | base + octave | MATLAB-style code with GNU Octave (+ signal, statistics, control, optim, io, image, symbolic) | Plots through the virtual display |
+| `full` | base + node + julia | Everything | Everything |
 
-**Old flavor names.** `python`, `python-gui`, `julia-gui` and `octave-gui` were dropped
-when Python and Xvfb moved into the base. Their tags are still published, as the flavor
-that replaced them, so existing instances keep getting updates. They are deprecated;
-switch to the new name:
+`full-rocm` is `full-utils` + ROCm (amd64), for AMDGPU.jl and PyTorch-ROCm.
+
+**Old flavor names.** Their tags are still published, as the flavor that replaced them,
+so existing instances keep getting updates. They are deprecated; switch to the new name:
 
 | Old | New |
 |---|---|
 | `python` | `minimal` |
-| `python-gui` | `minimal-chromium` |
-| `julia-gui` | `julia-chromium` (or `julia`, if you don't need Chromium) |
-| `octave-gui` | `octave` |
+| `python-gui` | `minimal-utils` |
+| `node-chromium` | `node-utils` (now also with the virtual display) |
+| `julia-gui` | `julia-utils` |
+| `octave-gui` | `octave-utils` (now also with Chromium) |
+| `full` | still exists, but is headless now: use `full-utils` for the old `full` |
 
 Quadlet: rerun `setup.sh` with your options, or any `setup.sh add-addon`/`remove-addon`,
-and it switches the instance to the new name (`setup.sh show NAME` prints the command).
-Compose: set `FLAVOR` in `.env`. Existing gateways keep their `GATEWAY_PROFILES`; add
-`python` there if agents in a non-Python box should reach PyPI (new instances get it by
-default).
+and it switches the instance to the new name (`setup.sh show NAME` prints the command;
+for `full`, pass `--flavor full-utils`). Compose: set `FLAVOR` in `.env`. Existing gateways
+keep their `GATEWAY_PROFILES`; add `python` there if agents in a non-Python box should
+reach PyPI (new instances get it by default).
 
 Gateway: `ghcr.io/OWNER/agent-sandbox-gateway:latest` (plain) and `:tailscale`.
 
 | Part | Folder | Contents |
 |---|---|---|
-| base | `images/base` | Debian trixie, git, gh, delta, zsh, build tools, Python 3 + uv, virtual X display (Xvfb) + Mesa, entrypoint |
+| base | `images/base` | Debian trixie, git, gh, delta, zsh, build tools, Python 3 + uv, entrypoint |
 | language images | `images/node`, `images/julia`, `images/octave` | Node 26 LTS + corepack · Julia (checksum-verified) · GNU Octave |
-| general add-ons (image layers) | `layers/chromium`, `layers/rocm` | Headless Chromium · ROCm runtime |
+| general add-ons (image layers) | `layers/utils`, `layers/rocm` | Virtual X display + Mesa, headless Chromium · ROCm runtime |
 | final step | `images/final` | Proxy settings, environment notes for the agent (last step of every image) |
 | gateway | `gateway` | Firewall, proxy, allowlists (`gateway/lists/*.list`) |
 | specific add-ons | `addons/claude-code`, `addons/codex`, `addons/gpu-local`, `addons/gpu-remote`, `addons/slurm`, `addons/git-remote`, `addons/github-app`, `addons/notify` | Claude Code · Codex · local GPU drop-ins · remote GPU gateway · Slurm gateway · Git hosting account · GitHub as a GitHub App · notifications |
@@ -136,7 +137,7 @@ so a container escape lands in an empty account. Needs Podman >= 5.0.
 2. As your normal user:
    ```bash
    cd deploy/quadlet
-   ./setup.sh --registry ghcr.io/OWNER --flavor node-chromium --name web \
+   ./setup.sh --registry ghcr.io/OWNER --flavor node-utils --name web \
               --workspace /var/srv/agent-sandbox/web --port 5173
    ```
    It sets up subuids, linger, the workspace (shared with your user via ACLs,
@@ -241,13 +242,13 @@ own hosts (`*_PRIVATE_IP` in their env file, see [Add-ons](#add-ons)).
 - **Dev servers** must listen on `0.0.0.0` inside the agent and use a published port
   (`--port 5173` / `PORTS`). Open `http://localhost:5173` (plain) or
   `http://<TS_HOSTNAME>:5173` (Tailscale).
-- **GLMakie** (every image): a virtual display (`DISPLAY=:99`) with Mesa software
+- **GLMakie** (`-utils` images): a virtual display (`DISPLAY=:99`) with Mesa software
   OpenGL starts with the container. Save figures to files. `VIRTUAL_DISPLAY=0` turns it
   off, `XVFB_RESOLUTION` changes the size.
 - **WGLMakie / Bonito**: publish port 9384, then
   `Bonito.configure_server!(listen_url="0.0.0.0", listen_port=9384, proxy_url="http://<host>:9384")`
   and open `/browser-display`.
-- **Headless Chromium** (`chromium` layer): no GPU, so WebGL runs on SwiftShader, and
+- **Headless Chromium** (`-utils` images): no GPU, so WebGL runs on SwiftShader, and
   rootless containers can't provide Chromium's sandbox. Debian's `chromium` picks up the
   flags from `/etc/chromium.d/container`; pass the same flags to Playwright or Electron:
   `--no-sandbox --use-angle=swiftshader --enable-unsafe-swiftshader`. Without them,

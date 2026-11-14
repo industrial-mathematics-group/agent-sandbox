@@ -15,10 +15,10 @@
 #
 #   --name NAME          instance name (default: agent). One instance = one gateway +
 #                        one agent container; run several for several projects.
-#   --flavor FLAVOR      image flavor: minimal minimal-chromium node node-chromium julia
-#                        julia-chromium octave full full-rocm (default: full). Every
-#                        flavor has Python (uv) and a virtual display. The old names
-#                        python, python-gui, julia-gui, octave-gui still work.
+#   --flavor FLAVOR      image flavor: minimal node julia octave full (headless, all with
+#                        Python + uv), each also as FLAVOR-utils (+ virtual display,
+#                        Chromium), or full-rocm (default: full-utils). The old names
+#                        python, python-gui, julia-gui, octave-gui, node-chromium still work.
 #   --workspace DIR      host folder mounted as /workspace
 #                        (default: /var/srv/agent-sandbox/<name>)
 #   --net plain|tailscale   egress directly (default) or only via a Tailscale exit node
@@ -45,7 +45,7 @@
 #   --dry-run            print what would be written, change nothing
 #
 # Example: a web project with a Vite dev server
-#   ./setup.sh --name web --flavor node-chromium --workspace ~/code/site --port 5173
+#   ./setup.sh --name web --flavor node-utils --workspace ~/code/site --port 5173
 # Later: GitHub access for it, then the instance's settings
 #   ./setup.sh add-addon web github-app
 #   ./setup.sh show web
@@ -55,7 +55,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
 
 NAME=agent
-FLAVOR=full
+FLAVOR=full-utils
 WORKSPACE=
 NET=plain
 MODE=standard
@@ -208,26 +208,26 @@ case "$CMD" in
         ADDONS=("${kept[@]}") ;;
 esac
 [[ "$NAME" =~ ^[a-z][a-z0-9-]{0,30}$ ]] || die "--name: lowercase letters, digits and '-' only"
-# Python and Xvfb moved into the base image: the python and -gui flavors are gone
+# Old flavor names (Python moved into the base, Xvfb + Chromium into the -utils variants)
 case "$FLAVOR" in
-    python)     NEW_FLAVOR=minimal ;;
-    python-gui) NEW_FLAVOR=minimal-chromium ;;
-    julia-gui)  NEW_FLAVOR=julia-chromium ;;
-    octave-gui) NEW_FLAVOR=octave ;;
-    *)          NEW_FLAVOR= ;;
+    python)        NEW_FLAVOR=minimal ;;
+    python-gui)    NEW_FLAVOR=minimal-utils ;;
+    node-chromium) NEW_FLAVOR=node-utils ;;
+    julia-gui)     NEW_FLAVOR=julia-utils ;;
+    octave-gui)    NEW_FLAVOR=octave-utils ;;
+    *)             NEW_FLAVOR= ;;
 esac
 OLD_FLAVOR=
 if [ -n "$NEW_FLAVOR" ]; then
     OLD_FLAVOR=$FLAVOR
     if [ "$CMD" = show ]; then
-        echo "NOTE: '$NAME' uses the old flavor name $FLAVOR, now $NEW_FLAVOR (Python and the virtual display" \
-             "are in every image). The old tag still gets updates; the command below switches to $NEW_FLAVOR."
+        echo "NOTE: '$NAME' uses the old flavor name $FLAVOR, now $NEW_FLAVOR. The old tag still gets updates; the command below switches to $NEW_FLAVOR."
     else
-        echo "NOTE: flavor $FLAVOR is now $NEW_FLAVOR (Python and the virtual display are in every image); using that."
+        echo "NOTE: flavor $FLAVOR is now $NEW_FLAVOR; using that."
     fi
     FLAVOR=$NEW_FLAVOR
 fi
-case "$FLAVOR" in minimal|minimal-chromium|node|node-chromium|julia|julia-chromium|octave|full|full-rocm) ;; *) die "unknown flavor $FLAVOR" ;; esac
+case "${FLAVOR%-utils}" in minimal|node|julia|octave|full) ;; *) [ "$FLAVOR" = full-rocm ] || die "unknown flavor $FLAVOR" ;; esac
 case "$NET" in plain|tailscale) ;; *) die "--net must be plain or tailscale" ;; esac
 case "$MODE" in standard|strict|open) ;; *) die "--mode must be standard, strict or open" ;; esac
 case "$GPU" in ""|amd|nvidia) ;; *) die "--gpu must be amd or nvidia" ;; esac
@@ -249,26 +249,27 @@ config_src_ok "$CLAUDE_CONFIG" || die "--claude-config: a volume name or an abso
 for p in "${PORTS[@]}"; do [[ "$p" =~ ^[0-9]{1,5}$ ]] || die "bad port $p"; done
 [ "$REGISTRY" != ghcr.io/OWNER ] || die "set --registry (or AGENT_SANDBOX_REGISTRY), e.g. ghcr.io/<owner> or localhost"
 
-# Image + default allowlists from the flavor
-base_flavor=${FLAVOR%-rocm}
+# Image + default allowlists from the flavor. lang: the core flavor without the
+# -utils/-rocm variant (full-rocm is full-utils + ROCm)
+lang=${FLAVOR%-rocm}; lang=${lang%-utils}
 IMAGE=$REGISTRY/agent-sandbox:$FLAVOR
-IMAGE_ROCM=$REGISTRY/agent-sandbox:$base_flavor-rocm
-[ "$GPU" = amd ] && [ "$base_flavor" != full ] && echo "NOTE: only full-rocm is prebuilt; build $base_flavor-rocm yourself (see build.sh) or use --flavor full."
+IMAGE_ROCM=$REGISTRY/agent-sandbox:$lang-rocm
+[ "$GPU" = amd ] && [ "$lang" != full ] && echo "NOTE: only full-rocm is prebuilt; build $lang-rocm yourself (see build.sh) or use --flavor full-utils."
 if [ -z "$PROFILES" ]; then
-    case "$base_flavor" in
-        # Every image has Python (uv), so PyPI is allowed by default everywhere
-        minimal|minimal-*) PROFILES=python ;;
-        node|node-*)       PROFILES=node,python ;;
-        julia|julia-*)     PROFILES=julia,python ;;
-        octave|octave-*)   PROFILES=octave,python ;;
-        full)              PROFILES=node,python,julia ;;
+    # Every image has Python (uv), so PyPI is allowed by default everywhere
+    case "$lang" in
+        minimal) PROFILES=python ;;
+        node)    PROFILES=node,python ;;
+        julia)   PROFILES=julia,python ;;
+        octave)  PROFILES=octave,python ;;
+        full)    PROFILES=node,python,julia ;;
     esac
 fi
 LANG_VOLUMES=()
-case "$base_flavor" in node*|full) LANG_VOLUMES+=("Volume=agent-sandbox-npm:/home/agent/.npm") ;; esac
+case "$lang" in node|full) LANG_VOLUMES+=("Volume=agent-sandbox-npm:/home/agent/.npm") ;; esac
 LANG_VOLUMES+=("Volume=agent-sandbox-uv-python:/home/agent/.local/share/uv")   # uv is in every image
-case "$base_flavor" in julia*|full) LANG_VOLUMES+=("Volume=agent-sandbox-julia-depot:/home/agent/.julia") ;; esac
-case "$base_flavor" in octave*) LANG_VOLUMES+=("Volume=agent-sandbox-octave:/home/agent/.local/share/octave") ;; esac
+case "$lang" in julia|full) LANG_VOLUMES+=("Volume=agent-sandbox-julia-depot:/home/agent/.julia") ;; esac
+case "$lang" in octave) LANG_VOLUMES+=("Volume=agent-sandbox-octave:/home/agent/.local/share/octave") ;; esac
 
 # Users and paths
 ME=$(id -un)

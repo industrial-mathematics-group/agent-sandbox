@@ -17,6 +17,8 @@ cd "$(dirname "$0")/../deploy/compose"
 FLAVOR=${1:-minimal}
 REGISTRY=${2:-localhost}
 TAG_SUFFIX=${TAG_SUFFIX:-}
+# What the image is: an old flavor name (python, *-gui …) means its successor
+KIND=$(../../build.sh --aliases | awk -v f="$FLAVOR" '$1 == f {print $2}'); KIND=${KIND:-$FLAVOR}
 WORKSPACE=$(mktemp -d)
 chmod 777 "$WORKSPACE"
 export SANDBOX_NAME=smoke FLAVOR="$FLAVOR$TAG_SUFFIX" REGISTRY GATEWAY_TAG="${GATEWAY_TAG:-latest}" WORKSPACE PORT_1=3999 PORTS=3999 CPUS=1 MEMORY=4g   # limits that fit any runner
@@ -77,19 +79,24 @@ if [ "$SMOKE_CODEX" = 1 ]; then
 else
     check "OpenAI without codex add-on"  blocked curl -sf -o /dev/null --max-time 15 https://api.openai.com
 fi
-# Every image: Python (uv) and the virtual display come from the base
+# Every image: Python (uv) from the base
 check "python3 + venv"               ok      sh -c 'python3 -m venv /tmp/smoke-venv && /tmp/smoke-venv/bin/python -c "import sys"'
 check "uv"                           ok      uv --version
 check "uv cache in ~/.cache"         ok      sh -c 'test "$(uv cache dir)" = /home/agent/.cache/uv'
-check "Xvfb display running"         ok      sh -c 'test -S /tmp/.X11-unix/X${DISPLAY#:}'
-check "OpenGL on the display"        ok      sh -c 'glxinfo -B | grep -Eq "OpenGL core profile version string: ([4-9]|3\.[3-9])"'
-case "$FLAVOR" in
-    *chromium*|full*) check "headless Chromium"  ok  timeout 90 chromium --headless=new --no-sandbox --dump-dom about:blank ;;
+case "$KIND" in
+    *-utils|full-rocm)
+        check "Xvfb display running"   ok  sh -c 'test -S /tmp/.X11-unix/X${DISPLAY#:}'
+        check "OpenGL on the display"  ok  sh -c 'glxinfo -B | grep -Eq "OpenGL core profile version string: ([4-9]|3\.[3-9])"'
+        check "headless Chromium"      ok  timeout 90 chromium --headless=new --no-sandbox --dump-dom about:blank ;;
+    *)
+        check "headless: no Xvfb"      blocked sh -c 'command -v Xvfb' ;;
 esac
-case "$FLAVOR" in
-    julia*|full*)     check "Julia"              ok  julia --startup-file=no -e 'exit(0)' ;;
-    node*)            check "Node"               ok  node --version ;;
-    octave*)          check "Octave"             ok  octave-cli --no-gui --eval 'exit(0)' ;;
+case "${KIND%-utils}" in
+    full*)   check "Julia"   ok  julia --startup-file=no -e 'exit(0)'
+             check "Node"    ok  node --version ;;
+    julia)   check "Julia"   ok  julia --startup-file=no -e 'exit(0)' ;;
+    node)    check "Node"    ok  node --version ;;
+    octave)  check "Octave"  ok  octave-cli --no-gui --eval 'exit(0)' ;;
 esac
 check "github-app broker answers"   ok      sh -c 'curl -s --noproxy "*" --max-time 60 http://127.0.0.1:3129/info | jq -e .host'
 # GitHub's answer to the throwaway key's JWT, not a proxy or network error
