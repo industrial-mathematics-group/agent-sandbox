@@ -8,7 +8,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 USER root
 ARG DEBIAN_FRONTEND=noninteractive
 
-# gnuplot-nox: plots to files without a display (also works without the xvfb layer)
+# gnuplot-nox: plots to files without a display (the base's Xvfb is optional)
 ARG OCTAVE_PACKAGES="octave-signal octave-statistics octave-control octave-optim octave-io octave-image octave-symbolic"
 RUN apt-get update && apt-get install -y --no-install-recommends \
       octave octave-dev gnuplot-nox texinfo ${OCTAVE_PACKAGES} \

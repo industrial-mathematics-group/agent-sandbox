@@ -47,7 +47,7 @@ the options back from the units, a host folder for `~/.claude` included). By han
 `~/.claude` was a host folder, pass it as `--claude-config`, e.g.
 
 ```bash
-./setup.sh --name claude-julia --flavor julia-gui --net tailscale --workspace /srv/claude/projects \
+./setup.sh --name claude-julia --flavor julia-chromium --net tailscale --workspace /srv/claude/projects \
            --memory 32g --cpus 16 --sandbox-user claude-sandbox --registry ghcr.io/OWNER \
            --claude-config /srv/claude/config
 ```

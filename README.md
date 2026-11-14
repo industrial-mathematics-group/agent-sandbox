@@ -8,8 +8,8 @@ Sandboxed containers for running Claude Code or OpenAI Codex (and similar coding
 with `--dangerously-skip-permissions` / `--yolo`, without handing them your machine or your
 network.
 
-- **Small images per language:** node, python, julia, or all of them, each optionally
-  with a virtual display, headless Chromium or ROCm.
+- **Small images per language:** node, julia, octave, or all of them, each optionally
+  with headless Chromium or ROCm. Python (uv) and a virtual display are in every image.
 - **Network through a gateway:** the agent container has no network of its own. It
   shares the namespace of a gateway sidecar that runs the firewall and a filtering
   proxy, so the agent can't change the rules. Only allowlisted hosts get through; LAN,
@@ -48,32 +48,52 @@ All images: `ghcr.io/OWNER/agent-sandbox:<flavor>` (also `<flavor>-YYYYMMDD`),
 
 | Flavor | Chain | For |
 |---|---|---|
-| `minimal` | base | Plain repo work, scripting |
+| `minimal` | base | Python projects, CAD (build123d), plotting, plain repo work, scripting |
+| `minimal-chromium` | base + chromium | The same with browser checks |
 | `node` | base + node | Websites, JS/TS tooling |
 | `node-chromium` | base + node + chromium | Web dev with Playwright / browser checks |
-| `python` | base + python | Python projects |
-| `python-gui` | base + python + xvfb + chromium | CAD (build123d), plotting, browser checks |
-| `julia` | base + julia | Julia packages |
-| `julia-gui` | base + julia + xvfb + chromium | GLMakie, WGLMakie tests |
-| `octave` | base + octave | MATLAB-style code with GNU Octave (+ signal, statistics, control, optim, io, image, symbolic) |
-| `octave-gui` | base + octave + xvfb | Octave with plots rendered through the virtual display |
-| `full` | base + node + python + julia + xvfb + chromium | Everything |
+| `julia` | base + julia | Julia packages, GLMakie |
+| `julia-chromium` | base + julia + chromium | WGLMakie tests (Electron.jl) |
+| `octave` | base + octave | MATLAB-style code with GNU Octave (+ signal, statistics, control, optim, io, image, symbolic), plots through the virtual display |
+| `full` | base + node + julia + chromium | Everything |
 | `full-rocm` | full + rocm (amd64) | AMDGPU.jl, PyTorch-ROCm |
+
+The base already has Python (`python3` + uv) and the virtual display (Xvfb + Mesa), so
+agents can script and test in Python in every box, and a host that runs several flavors
+stores them once.
+
+**Old flavor names.** `python`, `python-gui`, `julia-gui` and `octave-gui` were dropped
+when Python and Xvfb moved into the base. Their tags are still published, as the flavor
+that replaced them, so existing instances keep getting updates. They are deprecated;
+switch to the new name:
+
+| Old | New |
+|---|---|
+| `python` | `minimal` |
+| `python-gui` | `minimal-chromium` |
+| `julia-gui` | `julia-chromium` (or `julia`, if you don't need Chromium) |
+| `octave-gui` | `octave` |
+
+Quadlet: rerun `setup.sh` with your options, or any `setup.sh add-addon`/`remove-addon`,
+and it switches the instance to the new name (`setup.sh show NAME` prints the command).
+Compose: set `FLAVOR` in `.env`. Existing gateways keep their `GATEWAY_PROFILES`; add
+`python` there if agents in a non-Python box should reach PyPI (new instances get it by
+default).
 
 Gateway: `ghcr.io/OWNER/agent-sandbox-gateway:latest` (plain) and `:tailscale`.
 
 | Part | Folder | Contents |
 |---|---|---|
-| base | `images/base` | Debian trixie, git, gh, delta, zsh, build tools, entrypoint |
-| language images | `images/node`, `images/python`, `images/julia`, `images/octave` | Node 26 LTS + corepack · uv · Julia (checksum-verified) · GNU Octave |
-| general add-ons (image layers) | `layers/xvfb`, `layers/chromium`, `layers/rocm` | Virtual X display + Mesa · headless Chromium · ROCm runtime |
+| base | `images/base` | Debian trixie, git, gh, delta, zsh, build tools, Python 3 + uv, virtual X display (Xvfb) + Mesa, entrypoint |
+| language images | `images/node`, `images/julia`, `images/octave` | Node 26 LTS + corepack · Julia (checksum-verified) · GNU Octave |
+| general add-ons (image layers) | `layers/chromium`, `layers/rocm` | Headless Chromium · ROCm runtime |
 | final step | `images/final` | Proxy settings, environment notes for the agent (last step of every image) |
 | gateway | `gateway` | Firewall, proxy, allowlists (`gateway/lists/*.list`) |
 | specific add-ons | `addons/claude-code`, `addons/codex`, `addons/gpu-local`, `addons/gpu-remote`, `addons/slurm`, `addons/git-remote`, `addons/github-app`, `addons/notify` | Claude Code · Codex · local GPU drop-ins · remote GPU gateway · Slurm gateway · Git hosting account · GitHub as a GitHub App · notifications |
 | deployment | `deploy/quadlet`, `deploy/compose` | Quadlet templates + `setup.sh` · Compose files |
 
-Each layer adds a fragment to the environment notes (`/etc/agent-sandbox/AGENTS.md`), and
-so does each mounted add-on, so the agent is told exactly which tools it has. The file is
+The base and each layer add a fragment to the environment notes
+(`/etc/agent-sandbox/AGENTS.md`), and so does each mounted add-on, so the agent is told exactly which tools it has. The file is
 root-owned; the claude-code add-on hands it to Claude Code as the managed
 `/etc/claude-code/CLAUDE.md` (loaded in every session), the codex add-on to Codex as
 `developer_instructions` in `/etc/codex/config.toml`.
@@ -221,7 +241,7 @@ own hosts (`*_PRIVATE_IP` in their env file, see [Add-ons](#add-ons)).
 - **Dev servers** must listen on `0.0.0.0` inside the agent and use a published port
   (`--port 5173` / `PORTS`). Open `http://localhost:5173` (plain) or
   `http://<TS_HOSTNAME>:5173` (Tailscale).
-- **GLMakie** (`xvfb` layer): a virtual display (`DISPLAY=:99`) with Mesa software
+- **GLMakie** (every image): a virtual display (`DISPLAY=:99`) with Mesa software
   OpenGL starts with the container. Save figures to files. `VIRTUAL_DISPLAY=0` turns it
   off, `XVFB_RESOLUTION` changes the size.
 - **WGLMakie / Bonito**: publish port 9384, then

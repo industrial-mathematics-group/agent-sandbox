@@ -2,6 +2,7 @@
 # flavors and gateway variants, smoke-tests them (Docker only) and pushes them to
 # this Forgejo instance's container registry:
 #   <host>/<owner>/agent-sandbox:<flavor>             (+ <flavor>-YYYYMMDD, <flavor>-sha-xxxxxxx)
+#     also under the flavor's old names (python, *-gui; ./build.sh --aliases)
 # Packages of an organization are visible to its members (private/limited org).
 #   <host>/<owner>/agent-sandbox-gateway:latest       (+ :tailscale, same extra tags)
 #
@@ -158,17 +159,27 @@ jobs:
           SHA_TAG: ${{ steps.meta.outputs.sha_tag }}
         run: |
           echo "### Pushed" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          # An old flavor name (python, *-gui) means the flavor that replaced it;
+          # build.sh tagged the flavor under its old names too, push those as well.
+          aliases=$(./build.sh --aliases)
           images=()
+          add_flavor() {
+            local f a
+            f=$(awk -v t="$1" '$1 == t {print $2}' <<<"$aliases"); f=${f:-$1}
+            images+=("$REPO/agent-sandbox:$f")
+            for a in $(awk -v f="$f" '$2 == f {print $1}' <<<"$aliases"); do images+=("$REPO/agent-sandbox:$a"); done
+          }
           for t in $TARGETS; do
             case "$t" in
               gateway)           images+=("$REPO/agent-sandbox-gateway:latest") ;;
               gateway-tailscale) images+=("$REPO/agent-sandbox-gateway:tailscale") ;;
               all)
-                for f in $(./build.sh --list | awk '!/^gateway/ {print $1}'); do images+=("$REPO/agent-sandbox:$f"); done
+                for f in $(./build.sh --list | awk '!/^gateway/ {print $1}'); do add_flavor "$f"; done
                 images+=("$REPO/agent-sandbox-gateway:latest" "$REPO/agent-sandbox-gateway:tailscale") ;;
-              *)                 images+=("$REPO/agent-sandbox:$t") ;;
+              *)                 add_flavor "$t" ;;
             esac
           done
+          mapfile -t images < <(printf '%s\n' "${images[@]}" | awk '!seen[$0]++')
           for img in "${images[@]}"; do
             tags=("$img" "$img-$DATE_TAG" "$img-$SHA_TAG")
             for t in "${tags[@]:1}"; do $BUILDER tag "$img" "$t"; done

@@ -2,16 +2,18 @@
 # Builds agent-sandbox images locally (Podman, Docker or Buildah) and in CI.
 #
 #   ./build.sh full                    # one flavor
-#   ./build.sh node python gateway     # several
+#   ./build.sh node julia gateway      # several
 #   ./build.sh --list                  # what exists
+#   ./build.sh --aliases               # old flavor names (python, *-gui) and their successors
 #   ./build.sh --registry ghcr.io/me --tag-suffix -amd64 --push node
 #   ./build.sh --engine buildah node   # daemonless (CI runners without Docker)
 #
-# Every flavor is a chain: images/base -> its layers -> images/final.
-# No coding agent is part of any image: the claude-code and codex add-ons install
-# them at container start.
+# Every flavor is a chain: images/base -> its layers -> images/final. The base
+# already has Python (uv) and the virtual display (Xvfb + Mesa), so every flavor
+# has them and a host stores them once. No coding agent is part of any image: the
+# claude-code and codex add-ons install them at container start.
 # Each step is a normal `podman/docker build` with --build-arg BASE=<previous
-# step>, so there is nothing engine-specific. Shared prefixes (base, base+python …)
+# step>, so there is nothing engine-specific. Shared prefixes (base, base+node …)
 # are built once per run and come from the build cache after that.
 #
 # Version pins (all optional, passed through as build args when set):
@@ -23,20 +25,28 @@ cd "$(dirname "$0")"
 # flavor -> layers between base and the final step
 declare -A CHAIN=(
     [minimal]=""
+    [minimal-chromium]="layers/chromium"
     [node]="images/node"
     [node-chromium]="images/node layers/chromium"
-    [python]="images/python"
-    [python-gui]="images/python layers/xvfb layers/chromium"
     [julia]="images/julia"
-    [julia-gui]="images/julia layers/xvfb layers/chromium"
+    [julia-chromium]="images/julia layers/chromium"
     [octave]="images/octave"
-    [octave-gui]="images/octave layers/xvfb"
-    [full]="images/node images/python images/julia layers/xvfb layers/chromium"
-    [full-rocm]="images/node images/python images/julia layers/xvfb layers/chromium layers/rocm"
+    [full]="images/node images/julia layers/chromium"
+    [full-rocm]="images/node images/julia layers/chromium layers/rocm"
+)
+# Old flavor names -> the flavor that replaced them. Python and the virtual display
+# moved into the base, so the python and -gui flavors are gone. Building a flavor
+# also tags (and pushes) it under its old names, so existing deployments keep
+# pulling updates. Deprecated: switch to the new name.
+declare -A ALIAS=(
+    [python]=minimal
+    [python-gui]=minimal-chromium
+    [julia-gui]=julia-chromium
+    [octave-gui]=octave
 )
 # Gateway variants -> tag of agent-sandbox-gateway
 declare -A GATEWAY=( [gateway]=latest [gateway-tailscale]=tailscale )
-FLAVOR_ORDER="minimal node node-chromium python python-gui julia julia-gui octave octave-gui full full-rocm"
+FLAVOR_ORDER="minimal minimal-chromium node node-chromium julia julia-chromium octave full full-rocm"
 
 ENGINE=${ENGINE:-}
 REGISTRY=localhost
@@ -50,10 +60,13 @@ while [ $# -gt 0 ]; do
         --tag-suffix) SUFFIX=$2; shift 2 ;;
         --push)       PUSH=1; shift ;;
         --list)
-            for f in $FLAVOR_ORDER; do printf '%-14s base %s\n' "$f" "$(echo "${CHAIN[$f]}" | sed 's|images/||g; s|layers/|+|g')"; done
-            printf '%-14s gateway (plain)\n%-14s gateway (Tailscale exit node)\n' gateway gateway-tailscale
+            for f in $FLAVOR_ORDER; do printf '%-16s base %s\n' "$f" "$(echo "${CHAIN[$f]}" | sed 's|images/||g; s|layers/|+|g')"; done
+            printf '%-16s gateway (plain)\n%-16s gateway (Tailscale exit node)\n' gateway gateway-tailscale
             exit 0 ;;
-        -h|--help)    sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --aliases)    # old name -> flavor, one per line (CI tags the old names too)
+            for a in "${!ALIAS[@]}"; do echo "$a ${ALIAS[$a]}"; done | sort
+            exit 0 ;;
+        -h|--help)    sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         -*)           echo "unknown option $1" >&2; exit 2 ;;
         *)            targets+=("$1"); shift ;;
     esac
@@ -80,8 +93,17 @@ build() {   # build <context> <tag> [build args...]
     "$ENGINE" build "${extra[@]}" "${version_args[@]}" "$@" -t "$tag" -f "$ctx/Containerfile" "$ctx"
 }
 
+aliases_of() {   # aliases_of <flavor>: its old names
+    local a
+    for a in "${!ALIAS[@]}"; do [ "${ALIAS[$a]}" = "$1" ] && echo "$a"; done | sort
+}
+
 build_flavor() {
-    local flavor=$1 prev key layer tag
+    local flavor=$1 prev key layer tag a
+    if [ -n "${ALIAS[$flavor]+x}" ]; then
+        echo "NOTE: flavor '$flavor' is now '${ALIAS[$flavor]}' (Python and Xvfb are in every image); building that." >&2
+        flavor=${ALIAS[$flavor]}
+    fi
     [ -n "${CHAIN[$flavor]+x}" ] || { echo "unknown flavor '$flavor' (see --list)" >&2; exit 2; }
     key=base
     prev=$STAGE:base
@@ -95,6 +117,10 @@ build_flavor() {
     tag="$REGISTRY/agent-sandbox:$flavor$SUFFIX"
     build images/final "$tag" --build-arg "BASE=$prev" --build-arg "FLAVOR=$flavor"
     [ "$PUSH" = 1 ] && "$ENGINE" push "$tag"
+    for a in $(aliases_of "$flavor"); do
+        "$ENGINE" tag "$tag" "$REGISTRY/agent-sandbox:$a$SUFFIX"
+        [ "$PUSH" = 1 ] && "$ENGINE" push "$REGISTRY/agent-sandbox:$a$SUFFIX"
+    done
     return 0
 }
 
