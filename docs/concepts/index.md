@@ -3,19 +3,20 @@
 An instance of agent-sandbox is built from four kinds of parts:
 
 ```mermaid
-flowchart LR
+flowchart TB
     subgraph image["Agent image (one flavor)"]
-        base["base<br/>shell, build tools, Python + uv"] --> lang["language layer<br/>node / julia / octave"]
-        lang --> utils["utils layer (-utils)<br/>Xvfb, Mesa, Chromium"]
-        utils --> final["final step<br/>proxy settings, notes"]
+        direction LR
+        base["base<br/>shell, build tools,<br/>Python + uv"] --> lang["language<br/>node / julia /<br/>octave"]
+        lang --> utils["utils (-utils only)<br/>Xvfb, Mesa,<br/>Chromium"]
+        utils --> final["final step<br/>proxy settings,<br/>notes"]
     end
     subgraph instance["Instance"]
-        agent["agent container"] -- "shares network namespace" --> gw["gateway container<br/>firewall + proxy"]
-        addons["add-ons<br/>claude-code, codex, github-app, ..."] -. "mounted into" .-> agent
-        addons -. "env file allowlists hosts" .-> gw
+        direction LR
+        addons["add-ons<br/>claude-code, codex,<br/>github-app, ..."] -. "mounted" .-> agent["agent<br/>container"]
+        agent -- "shares<br/>network" --> gw["gateway<br/>firewall + proxy<br/>→ allowlisted hosts"]
+        addons -. "allowlist<br/>their hosts" .-> gw
     end
-    image --> agent
-    gw --> internet(("allowlisted hosts"))
+    image -- "runs as" --> instance
 ```
 
 - **[Images](images.md):** the agent container's image, a chain of layers chosen by the
