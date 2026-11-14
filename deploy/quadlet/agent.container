@@ -1,8 +1,9 @@
 # agent-sandbox instance "@NAME@": the agent container (@FLAVOR@).
 # Shares the gateway's network namespace, has no network capabilities, sees only
-# its workspace.
+# its workspace. The coding agent (Claude Code, Codex) comes from an add-on drop-in
+# in @NAME@.container.d/ (20-claude-code.conf, 21-codex.conf).
 #
-#   podman exec -it -u agent @NAME@ claude
+#   podman exec -it -u agent @NAME@ claude      (or codex)
 [Unit]
 Description=agent-sandbox @NAME@ - agent (@FLAVOR@)
 # Start after the gateway; stop and restart together with it (a restarted gateway
@@ -38,10 +39,7 @@ Environment=GIT_CONFIG_VALUE_0=*
 
 # Workspace (prepared by setup.sh; already SELinux-labelled, so no :Z here)
 Volume=@WORKSPACE@:/workspace
-# Shared between instances: Claude login/settings, history, language caches
-Volume=agent-sandbox-claude:/home/agent/.claude
-# Claude Code CLI, installed by the entrypoint (root-owned, read-only for the agent)
-Volume=agent-sandbox-claude-cli:/opt/claude-code
+# Shared between instances: history, language caches
 Volume=agent-sandbox-history:/commandhistory
 Volume=agent-sandbox-cache:/home/agent/.cache
 @LANG_VOLUMES@

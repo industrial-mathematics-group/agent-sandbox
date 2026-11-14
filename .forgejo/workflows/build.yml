@@ -86,7 +86,7 @@ jobs:
 
           # Exact Julia version as build arg, so the layer cache is invalidated exactly
           # when a new release exists ("latest" would stay cached forever).
-          # (Claude Code isn't in the images; the entrypoint installs it at start.)
+          # (No coding agent is in the images; the claude-code/codex add-ons install it at start.)
           if [ -n "$JULIA_PIN" ] && [ "$JULIA_PIN" != latest ]; then
             julia=$JULIA_PIN
           else

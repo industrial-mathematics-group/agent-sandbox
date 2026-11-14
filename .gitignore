@@ -5,3 +5,4 @@ deploy/compose/*.env
 deploy/compose/extra.list
 deploy/compose/workspace/
 deploy/compose/*-ssh/
+deploy/compose/codex/

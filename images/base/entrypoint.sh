@@ -1,8 +1,9 @@
 #!/bin/bash
 # agent-sandbox entrypoint. The network (proxy + firewall, optionally a VPN) is
 # owned by the gateway sidecar; this container has no network capabilities.
-# Runs as (container) root only long enough to check the network, run the layer
-# hooks and assemble CLAUDE.md, then drops to `agent` for good.
+# Runs as (container) root only long enough to check the network, assemble the
+# agent notes and run the layer and add-on hooks (which install the coding agent
+# CLIs, see addons/claude-code and addons/codex), then drops to `agent` for good.
 set -euo pipefail
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -49,21 +50,9 @@ if [ "${SANDBOX_SKIP_NETWORK_CHECK:-0}" != 1 ]; then
         echo "ERROR: $url is unreachable through the gateway. Check its log." >&2
         exit 1
     }
-    require_reachable https://api.anthropic.com
+    # GitHub is on the gateway's base list; the agents' own hosts come from their add-ons
+    require_reachable https://api.github.com
     echo "Network ready (egress only through the gateway)."
-fi
-
-# ---------------------------------------------------------------------------
-# Claude Code: installed/updated at start into the root-owned /opt/claude-code
-# (not part of the image). A failed update keeps the version already there.
-# ---------------------------------------------------------------------------
-if ! /usr/local/bin/install-claude-code; then
-    if [ -x /opt/claude-code/bin/claude ]; then
-        echo "WARN: Claude Code update failed, keeping $(/opt/claude-code/bin/claude --version 2>/dev/null | head -1)" >&2
-    else
-        echo "WARN: Claude Code could not be installed; \`claude\` is unavailable. Check the gateway log" \
-             "(claude.ai and downloads.claude.ai must be allowed)." >&2
-    fi
 fi
 
 export HOME=/home/agent USER=agent LOGNAME=agent
@@ -109,11 +98,27 @@ if compgen -G '/opt/agent-sandbox/addons/*' >/dev/null && [ "${#addon_bins[@]}" 
 fi
 unset addon_bins
 
+# Claude Code used to be part of the image; it is the claude-code add-on now. An
+# instance set up before still mounts its volume but not the add-on.
+if [ ! -d /opt/agent-sandbox/addons/claude-code ] && mountpoint -q /opt/claude-code 2>/dev/null; then
+    echo "WARN: Claude Code is an add-on now and this instance doesn't mount it, so \`claude\` is" \
+         "not installed. Rerun deploy/quadlet/setup.sh with your options (it adds the add-on by" \
+         "default), or add -f ../../addons/claude-code/compose.yaml (see addons/claude-code/README.md)." >&2
+fi
+
 # ---------------------------------------------------------------------------
-# 3. Layer hooks (e.g. Xvfb from layers/xvfb). Sourced as root; they start
+# 3. Agent notes: image fragments + mounted add-on fragments, assembled into the
+#    root-owned /etc/agent-sandbox/AGENTS.md before the hooks, which hand it to
+#    the agent CLIs (claude-code: /etc/claude-code/CLAUDE.md).
+# ---------------------------------------------------------------------------
+/usr/local/bin/assemble-agent-md
+
+# ---------------------------------------------------------------------------
+# 4. Layer hooks (e.g. Xvfb from layers/xvfb). Sourced as root; they start
 #    their own processes with drop_to_agent. Add-ons can ship their own
-#    (/opt/agent-sandbox/addons/<name>/entrypoint.d/), e.g. git-remote writes
-#    /etc/gitconfig, notify installs Claude Code hooks; those are read as agent.
+#    (/opt/agent-sandbox/addons/<name>/entrypoint.d/), e.g. claude-code and codex
+#    install their CLI, git-remote writes /etc/gitconfig, notify installs Claude
+#    Code hooks; those are read as agent and run as root.
 # ---------------------------------------------------------------------------
 for hook in /usr/local/lib/agent-sandbox/entrypoint.d/*.sh; do
     [ -r "$hook" ] || continue
@@ -129,12 +134,6 @@ for hook in "${addon_hooks[@]}"; do
     eval "$hook_src"
 done
 unset addon_hooks hook_src
-
-# ---------------------------------------------------------------------------
-# 4. Managed CLAUDE.md: image fragments + mounted add-on fragments. Root-owned,
-#    so the agent can read but not change it.
-# ---------------------------------------------------------------------------
-/usr/local/bin/assemble-claude-md
 
 echo "Sandbox ready."
 exec setpriv --reuid=agent --regid=agent "$GROUPS_OPT" --inh-caps=-all -- "$@"
