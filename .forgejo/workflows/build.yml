@@ -2,7 +2,7 @@
 # flavors and gateway variants, smoke-tests them (Docker only) and pushes them to
 # this Forgejo instance's container registry:
 #   <host>/<owner>/agent-sandbox:<flavor>             (+ <flavor>-YYYYMMDD, <flavor>-sha-xxxxxxx)
-#     also under the flavor's old names (python, *-gui; ./build.sh --aliases)
+#     also under the flavor's old names (python, *-gui, node-chromium; ./build.sh --aliases)
 # Packages of an organization are visible to its members (private/limited org).
 #   <host>/<owner>/agent-sandbox-gateway:latest       (+ :tailscale, same extra tags)
 #
@@ -25,7 +25,7 @@ on:
     inputs:
       targets:
         description: "Flavors and gateways to build (./build.sh --list), space separated"
-        default: "full gateway gateway-tailscale"
+        default: "full-utils gateway gateway-tailscale"
       push:
         description: "Push to the registry after the smoke test"
         type: boolean
@@ -159,7 +159,7 @@ jobs:
           SHA_TAG: ${{ steps.meta.outputs.sha_tag }}
         run: |
           echo "### Pushed" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
-          # An old flavor name (python, *-gui) means the flavor that replaced it;
+          # An old flavor name (python, *-gui, node-chromium) means the flavor that replaced it;
           # build.sh tagged the flavor under its old names too, push those as well.
           aliases=$(./build.sh --aliases)
           images=()

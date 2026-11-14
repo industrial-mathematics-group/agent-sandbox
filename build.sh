@@ -4,14 +4,17 @@
 #   ./build.sh full                    # one flavor
 #   ./build.sh node julia gateway      # several
 #   ./build.sh --list                  # what exists
-#   ./build.sh --aliases               # old flavor names (python, *-gui) and their successors
+#   ./build.sh --aliases               # old flavor names and their successors
 #   ./build.sh --registry ghcr.io/me --tag-suffix -amd64 --push node
 #   ./build.sh --engine buildah node   # daemonless (CI runners without Docker)
 #
-# Every flavor is a chain: images/base -> its layers -> images/final. The base
-# already has Python (uv) and the virtual display (Xvfb + Mesa), so every flavor
-# has them and a host stores them once. No coding agent is part of any image: the
-# claude-code and codex add-ons install them at container start.
+# Every flavor is a chain: images/base -> its layers -> images/final. Two tiers:
+#   <flavor>        headless core: base (shell tools, Python + uv) + the language
+#   <flavor>-utils  the same + layers/utils (virtual display, Chromium, and any
+#                   other general tool worth having in every box)
+# so a host running several flavors stores base and the language layers once.
+# No coding agent is part of any image: the claude-code and codex add-ons install
+# them at container start.
 # Each step is a normal `podman/docker build` with --build-arg BASE=<previous
 # step>, so there is nothing engine-specific. Shared prefixes (base, base+node …)
 # are built once per run and come from the build cache after that.
@@ -22,31 +25,32 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-# flavor -> layers between base and the final step
+# flavor -> layers between base and the final step (the headless core); every
+# core flavor also gets a <flavor>-utils variant with layers/utils on top
 declare -A CHAIN=(
     [minimal]=""
-    [minimal-chromium]="layers/chromium"
     [node]="images/node"
-    [node-chromium]="images/node layers/chromium"
     [julia]="images/julia"
-    [julia-chromium]="images/julia layers/chromium"
     [octave]="images/octave"
-    [full]="images/node images/julia layers/chromium"
-    [full-rocm]="images/node images/julia layers/chromium layers/rocm"
+    [full]="images/node images/julia"
 )
-# Old flavor names -> the flavor that replaced them. Python and the virtual display
-# moved into the base, so the python and -gui flavors are gone. Building a flavor
-# also tags (and pushes) it under its old names, so existing deployments keep
-# pulling updates. Deprecated: switch to the new name.
+CORE_ORDER="minimal node julia octave full"
+for f in $CORE_ORDER; do CHAIN[$f-utils]="${CHAIN[$f]} layers/utils"; done
+# Extras on top of a -utils variant
+CHAIN[full-rocm]="${CHAIN[full-utils]} layers/rocm"
+FLAVOR_ORDER="$(for f in $CORE_ORDER; do printf '%s %s-utils ' "$f" "$f"; done)full-rocm"
+# Old flavor names -> the flavor that replaced them. Building a flavor also tags
+# (and pushes) it under its old names, so existing deployments keep pulling
+# updates. Deprecated: switch to the new name.
 declare -A ALIAS=(
     [python]=minimal
-    [python-gui]=minimal-chromium
-    [julia-gui]=julia-chromium
-    [octave-gui]=octave
+    [python-gui]=minimal-utils
+    [node-chromium]=node-utils
+    [julia-gui]=julia-utils
+    [octave-gui]=octave-utils
 )
 # Gateway variants -> tag of agent-sandbox-gateway
 declare -A GATEWAY=( [gateway]=latest [gateway-tailscale]=tailscale )
-FLAVOR_ORDER="minimal minimal-chromium node node-chromium julia julia-chromium octave full full-rocm"
 
 ENGINE=${ENGINE:-}
 REGISTRY=localhost
@@ -60,7 +64,7 @@ while [ $# -gt 0 ]; do
         --tag-suffix) SUFFIX=$2; shift 2 ;;
         --push)       PUSH=1; shift ;;
         --list)
-            for f in $FLAVOR_ORDER; do printf '%-16s base %s\n' "$f" "$(echo "${CHAIN[$f]}" | sed 's|images/||g; s|layers/|+|g')"; done
+            for f in $FLAVOR_ORDER; do printf '%-16s %s\n' "$f" "$(echo base ${CHAIN[$f]} | sed 's|images/||g; s|layers/|+|g')"; done
             printf '%-16s gateway (plain)\n%-16s gateway (Tailscale exit node)\n' gateway gateway-tailscale
             exit 0 ;;
         --aliases)    # old name -> flavor, one per line (CI tags the old names too)
@@ -101,7 +105,7 @@ aliases_of() {   # aliases_of <flavor>: its old names
 build_flavor() {
     local flavor=$1 prev key layer tag a
     if [ -n "${ALIAS[$flavor]+x}" ]; then
-        echo "NOTE: flavor '$flavor' is now '${ALIAS[$flavor]}' (Python and Xvfb are in every image); building that." >&2
+        echo "NOTE: flavor '$flavor' is now '${ALIAS[$flavor]}'; building that." >&2
         flavor=${ALIAS[$flavor]}
     fi
     [ -n "${CHAIN[$flavor]+x}" ] || { echo "unknown flavor '$flavor' (see --list)" >&2; exit 2; }
