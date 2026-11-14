@@ -77,7 +77,21 @@ if [ "$SMOKE_CODEX" = 1 ]; then
 else
     check "OpenAI without codex add-on"  blocked curl -sf -o /dev/null --max-time 15 https://api.openai.com
 fi
-check "github-app broker answers"    ok      sh -c 'curl -s --noproxy "*" --max-time 60 http://127.0.0.1:3129/info | jq -e .host'
+# Every image: Python (uv) and the virtual display come from the base
+check "python3 + venv"               ok      sh -c 'python3 -m venv /tmp/smoke-venv && /tmp/smoke-venv/bin/python -c "import sys"'
+check "uv"                           ok      uv --version
+check "uv cache in ~/.cache"         ok      sh -c 'test "$(uv cache dir)" = /home/agent/.cache/uv'
+check "Xvfb display running"         ok      sh -c 'test -S /tmp/.X11-unix/X${DISPLAY#:}'
+check "OpenGL on the display"        ok      sh -c 'glxinfo -B | grep -Eq "OpenGL core profile version string: ([4-9]|3\.[3-9])"'
+case "$FLAVOR" in
+    *chromium*|full*) check "headless Chromium"  ok  timeout 90 chromium --headless=new --no-sandbox --dump-dom about:blank ;;
+esac
+case "$FLAVOR" in
+    julia*|full*)     check "Julia"              ok  julia --startup-file=no -e 'exit(0)' ;;
+    node*)            check "Node"               ok  node --version ;;
+    octave*)          check "Octave"             ok  octave-cli --no-gui --eval 'exit(0)' ;;
+esac
+check "github-app broker answers"   ok      sh -c 'curl -s --noproxy "*" --max-time 60 http://127.0.0.1:3129/info | jq -e .host'
 # GitHub's answer to the throwaway key's JWT, not a proxy or network error
 echo "      broker /token: $(dc exec -T -u agent agent curl -s --noproxy '*' --max-time 60 http://127.0.0.1:3129/token 2>&1 | head -c 400)"
 check "github-app broker reaches GitHub" ok  sh -c 'curl -s --noproxy "*" --max-time 60 http://127.0.0.1:3129/token | jq -e ".error | test(\"access_tokens: .\") and (test(\"curl|CONNECT|resolve\") | not)"'

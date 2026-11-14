@@ -15,13 +15,16 @@
 #
 #   --name NAME          instance name (default: agent). One instance = one gateway +
 #                        one agent container; run several for several projects.
-#   --flavor FLAVOR      image flavor: minimal node node-chromium python python-gui
-#                        julia julia-gui octave octave-gui full full-rocm (default: full)
+#   --flavor FLAVOR      image flavor: minimal minimal-chromium node node-chromium julia
+#                        julia-chromium octave full full-rocm (default: full). Every
+#                        flavor has Python (uv) and a virtual display. The old names
+#                        python, python-gui, julia-gui, octave-gui still work.
 #   --workspace DIR      host folder mounted as /workspace
 #                        (default: /var/srv/agent-sandbox/<name>)
 #   --net plain|tailscale   egress directly (default) or only via a Tailscale exit node
 #   --mode standard|strict|open   gateway filter mode (default: standard)
-#   --profiles LIST      allowlists besides base (default: from the flavor, e.g. node,python,julia)
+#   --profiles LIST      allowlists besides base (default: python + the flavor's language,
+#                        e.g. julia,python)
 #   --port N             publish/open a TCP port for dev servers (repeatable).
 #                        plain: published on 127.0.0.1:N of the host; tailscale: open on the tailnet
 #   --gpu amd|nvidia     local GPU (amd switches to the -rocm image)
@@ -205,7 +208,26 @@ case "$CMD" in
         ADDONS=("${kept[@]}") ;;
 esac
 [[ "$NAME" =~ ^[a-z][a-z0-9-]{0,30}$ ]] || die "--name: lowercase letters, digits and '-' only"
-case "$FLAVOR" in minimal|node|node-chromium|python|python-gui|julia|julia-gui|octave|octave-gui|full|full-rocm) ;; *) die "unknown flavor $FLAVOR" ;; esac
+# Python and Xvfb moved into the base image: the python and -gui flavors are gone
+case "$FLAVOR" in
+    python)     NEW_FLAVOR=minimal ;;
+    python-gui) NEW_FLAVOR=minimal-chromium ;;
+    julia-gui)  NEW_FLAVOR=julia-chromium ;;
+    octave-gui) NEW_FLAVOR=octave ;;
+    *)          NEW_FLAVOR= ;;
+esac
+OLD_FLAVOR=
+if [ -n "$NEW_FLAVOR" ]; then
+    OLD_FLAVOR=$FLAVOR
+    if [ "$CMD" = show ]; then
+        echo "NOTE: '$NAME' uses the old flavor name $FLAVOR, now $NEW_FLAVOR (Python and the virtual display" \
+             "are in every image). The old tag still gets updates; the command below switches to $NEW_FLAVOR."
+    else
+        echo "NOTE: flavor $FLAVOR is now $NEW_FLAVOR (Python and the virtual display are in every image); using that."
+    fi
+    FLAVOR=$NEW_FLAVOR
+fi
+case "$FLAVOR" in minimal|minimal-chromium|node|node-chromium|julia|julia-chromium|octave|full|full-rocm) ;; *) die "unknown flavor $FLAVOR" ;; esac
 case "$NET" in plain|tailscale) ;; *) die "--net must be plain or tailscale" ;; esac
 case "$MODE" in standard|strict|open) ;; *) die "--mode must be standard, strict or open" ;; esac
 case "$GPU" in ""|amd|nvidia) ;; *) die "--gpu must be amd or nvidia" ;; esac
@@ -234,17 +256,17 @@ IMAGE_ROCM=$REGISTRY/agent-sandbox:$base_flavor-rocm
 [ "$GPU" = amd ] && [ "$base_flavor" != full ] && echo "NOTE: only full-rocm is prebuilt; build $base_flavor-rocm yourself (see build.sh) or use --flavor full."
 if [ -z "$PROFILES" ]; then
     case "$base_flavor" in
-        minimal)          PROFILES= ;;
-        node|node-*)      PROFILES=node ;;
-        python|python-*)  PROFILES=python ;;
-        julia|julia-*)    PROFILES=julia ;;
-        octave|octave-*)  PROFILES=octave ;;
-        full)             PROFILES=node,python,julia ;;
+        # Every image has Python (uv), so PyPI is allowed by default everywhere
+        minimal|minimal-*) PROFILES=python ;;
+        node|node-*)       PROFILES=node,python ;;
+        julia|julia-*)     PROFILES=julia,python ;;
+        octave|octave-*)   PROFILES=octave,python ;;
+        full)              PROFILES=node,python,julia ;;
     esac
 fi
 LANG_VOLUMES=()
 case "$base_flavor" in node*|full) LANG_VOLUMES+=("Volume=agent-sandbox-npm:/home/agent/.npm") ;; esac
-case "$base_flavor" in python*|full) LANG_VOLUMES+=("Volume=agent-sandbox-uv-python:/home/agent/.local/share/uv") ;; esac
+LANG_VOLUMES+=("Volume=agent-sandbox-uv-python:/home/agent/.local/share/uv")   # uv is in every image
 case "$base_flavor" in julia*|full) LANG_VOLUMES+=("Volume=agent-sandbox-julia-depot:/home/agent/.julia") ;; esac
 case "$base_flavor" in octave*) LANG_VOLUMES+=("Volume=agent-sandbox-octave:/home/agent/.local/share/octave") ;; esac
 
@@ -283,7 +305,7 @@ setup_cmdline() {
 }
 if [ "$CMD" = show ]; then
     echo "Instance '$NAME' of $SANDBOX_USER (settings from $SETTINGS_FROM)"
-    echo "  image       $IMAGE$( [ "$GPU" = amd ] && echo " ($IMAGE_ROCM with the GPU)")"
+    echo "  image       ${OLD_FLAVOR:+$REGISTRY/agent-sandbox:$OLD_FLAVOR (old name of }$IMAGE${OLD_FLAVOR:+)}$( [ "$GPU" = amd ] && echo " ($IMAGE_ROCM with the GPU)")"
     echo "  workspace   $WORKSPACE"
     echo "  network     $NET, gateway mode $MODE, profiles base${PROFILES:+,$PROFILES}"
     echo "  ports       ${PORTS[*]:-(none)}"

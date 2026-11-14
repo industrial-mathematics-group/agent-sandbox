@@ -1,5 +1,6 @@
 # Builds and publishes all images to GHCR:
 #   ghcr.io/<owner>/agent-sandbox:<flavor>          (+ <flavor>-YYYYMMDD)
+#     also under the flavor's old names (python, *-gui; ./build.sh --aliases)
 #   ghcr.io/<owner>/agent-sandbox-gateway:latest    (+ :tailscale, and -YYYYMMDD variants)
 # On push to main, weekly (new Julia releases, base image fixes) and on demand.
 # Images are pushed to the owner's namespace; GHCR keeps new packages private
@@ -76,7 +77,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        flavor: [minimal, node, node-chromium, python, python-gui, julia, julia-gui, octave, octave-gui, full, full-rocm]
+        flavor: [minimal, minimal-chromium, node, node-chromium, julia, julia-chromium, octave, full, full-rocm]
         arch: [amd64, arm64]
         exclude:
           - { flavor: full-rocm, arch: arm64 }   # ROCm is amd64 only
@@ -108,10 +109,11 @@ jobs:
     runs-on: ubuntu-24.04
     strategy:
       matrix:
-        flavor: [minimal, node, node-chromium, python, python-gui, julia, julia-gui, octave, octave-gui, full, full-rocm]
+        flavor: [minimal, minimal-chromium, node, node-chromium, julia, julia-chromium, octave, full, full-rocm]
     env:
       IMG: ${{ needs.versions.outputs.registry }}/agent-sandbox
     steps:
+      - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
@@ -121,9 +123,11 @@ jobs:
           f=${{ matrix.flavor }}
           srcs=("$IMG:$f-amd64")
           [ "$f" = full-rocm ] || srcs+=("$IMG:$f-arm64")
-          docker buildx imagetools create \
-            -t "$IMG:$f" \
-            -t "$IMG:$f-${{ needs.versions.outputs.date }}" \
-            "${srcs[@]}"
+          tags=(-t "$IMG:$f" -t "$IMG:$f-${{ needs.versions.outputs.date }}")
+          # Old names (python, *-gui) keep getting updates, so deployments still on them don't go stale
+          for a in $(./build.sh --aliases | awk -v f="$f" '$2 == f {print $1}'); do
+            tags+=(-t "$IMG:$a" -t "$IMG:$a-${{ needs.versions.outputs.date }}")
+          done
+          docker buildx imagetools create "${tags[@]}" "${srcs[@]}"
           digest=$(docker buildx imagetools inspect "$IMG:$f" --format '{{json .Manifest}}' | jq -r .digest)
           cosign sign --yes "$IMG@$digest"
