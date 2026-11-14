@@ -36,7 +36,7 @@ codex_setup() {
     fi
     if ! CODEX_VERSION=$version bash -c "$src" install-codex; then
         if [ -x /opt/codex/bin/codex ]; then
-            echo "WARN: Codex update failed, keeping $(/opt/codex/bin/codex --version 2>/dev/null | head -1)" >&2
+            echo "WARN: Codex update failed, keeping $(CODEX_HOME=/opt/codex/.root-home /opt/codex/bin/codex --version 2>/dev/null | head -1)" >&2
         else
             echo "WARN: Codex could not be installed; \`codex\` is unavailable. Check the gateway log" \
                  "(registry.npmjs.org must be allowed: codex.env mounted into the gateway?)." >&2
