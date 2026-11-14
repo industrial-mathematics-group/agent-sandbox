@@ -23,7 +23,7 @@ codex_setup() {
         echo "WARN: codex: $f is not readable by agent; using defaults (and the gateway" \
              "may not allow OpenAI's hosts)." >&2
     fi
-    version=${version:-${CODEX_VERSION:-latest}}
+    version=${version:-latest}
     case "$sandbox" in
         danger-full-access|workspace-write|read-only) ;;
         *) echo "WARN: codex: unknown CODEX_SANDBOX_MODE '$sandbox'; using danger-full-access" >&2

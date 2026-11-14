@@ -48,7 +48,7 @@ services:
     restart: unless-stopped
 
   agent:
-    image: ${REGISTRY:-ghcr.io/OWNER}/agent-sandbox:${FLAVOR:-full}
+    image: ${REGISTRY:-ghcr.io/OWNER}/agent-sandbox:${FLAVOR:-full-utils}
     network_mode: service:gateway
     depends_on: [gateway]
     env_file: [sandbox.env]

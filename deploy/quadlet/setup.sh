@@ -9,19 +9,21 @@
 #   ./setup.sh remove-addon NAME ADDON... remove add-ons from an instance
 #
 # show/add-addon/remove-addon read the instance's settings (saved by setup.sh in
-# ~SANDBOX_USER/.config/agent-sandbox/NAME/setup.conf, or from its unit files) and keep
+# ~SANDBOX_USER/.config/agent-sandbox/NAME/setup.conf) and keep
 # every env file. Pass --sandbox-user if it is not agent-sandbox; other options below
 # change that setting too. Host setup is skipped unless you pass --host-setup.
 #
 #   --name NAME          instance name (default: agent). One instance = one gateway +
 #                        one agent container; run several for several projects.
-#   --flavor FLAVOR      image flavor: minimal node node-chromium python python-gui
-#                        julia julia-gui octave octave-gui full full-rocm (default: full)
+#   --flavor FLAVOR      image flavor: minimal node julia octave full (headless, all with
+#                        Python + uv), each also as FLAVOR-utils (+ virtual display,
+#                        Chromium), or full-rocm (default: full-utils)
 #   --workspace DIR      host folder mounted as /workspace
 #                        (default: /var/srv/agent-sandbox/<name>)
 #   --net plain|tailscale   egress directly (default) or only via a Tailscale exit node
 #   --mode standard|strict|open   gateway filter mode (default: standard)
-#   --profiles LIST      allowlists besides base (default: from the flavor, e.g. node,python,julia)
+#   --profiles LIST      allowlists besides base (default: python + the flavor's language,
+#                        e.g. julia,python)
 #   --port N             publish/open a TCP port for dev servers (repeatable).
 #                        plain: published on 127.0.0.1:N of the host; tailscale: open on the tailnet
 #   --gpu amd|nvidia     local GPU (amd switches to the -rocm image)
@@ -42,7 +44,7 @@
 #   --dry-run            print what would be written, change nothing
 #
 # Example: a web project with a Vite dev server
-#   ./setup.sh --name web --flavor node-chromium --workspace ~/code/site --port 5173
+#   ./setup.sh --name web --flavor node-utils --workspace ~/code/site --port 5173
 # Later: GitHub access for it, then the instance's settings
 #   ./setup.sh add-addon web github-app
 #   ./setup.sh show web
@@ -52,7 +54,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
 
 NAME=agent
-FLAVOR=full
+FLAVOR=full-utils
 WORKSPACE=
 NET=plain
 MODE=standard
@@ -82,49 +84,24 @@ sb_read() { as_sb_user cat "$1" 2>/dev/null || true; }   # empty if missing
 sb_exists() { as_sb_user test -e "$1"; }
 env_value() { sed -n "s/^$2=//p" <<<"$1" | tail -n 1; }   # env_value <text> <KEY>
 load_instance() {
-    local home units cfg c f gw
+    local home units cfg gw
     id "$SANDBOX_USER" >/dev/null 2>&1 || die "user $SANDBOX_USER does not exist (--sandbox-user?)"
     home=$(getent passwd "$SANDBOX_USER" | cut -d: -f6)
     units=$home/.config/containers/systemd
     cfg=$home/.config/agent-sandbox/$NAME
     sb_exists "$units/$NAME.container" \
         || die "no instance '$NAME' for user $SANDBOX_USER ($units/$NAME.container is missing; --sandbox-user?)"
-    if sb_exists "$cfg/setup.conf"; then
-        SETTINGS_FROM=$cfg/setup.conf
-        while IFS='=' read -r k v; do
-            case "$k" in
-                FLAVOR|WORKSPACE|NET|MODE|PROFILES|GPU|CLAUDE_CONFIG|CODEX_CONFIG|MEMORY|CPUS|REGISTRY)
-                    printf -v "$k" '%s' "$v" ;;
-                PORTS)  read -ra PORTS <<<"$v" ;;
-                ADDONS) read -ra ADDONS <<<"$v" ;;
-            esac
-        done < <(sb_read "$cfg/setup.conf")
-    else
-        # Set up before setup.sh saved its settings: read them back from the units
-        SETTINGS_FROM="the unit files in $units"
-        c=$(sb_read "$units/$NAME.container")
-        f=$(sed -n 's/^Image=//p' <<<"$c" | head -n 1)        # REGISTRY/agent-sandbox:FLAVOR
-        REGISTRY=${f%/agent-sandbox:*}; FLAVOR=${f##*:}
-        WORKSPACE=$(sed -n 's|^Volume=\(.*\):/workspace$|\1|p' <<<"$c" | head -n 1)
-        f=$(grep -o -- '--memory=[^ ]*' <<<"$c" | head -n 1); [ -z "$f" ] || MEMORY=${f#*=}
-        f=$(grep -o -- '--cpus=[^ ]*' <<<"$c" | head -n 1);   [ -z "$f" ] || CPUS=${f#*=}
-        sb_exists "$units/$NAME-gateway.container.d/10-tailscale.conf" && NET=tailscale
-        for f in amd nvidia; do sb_exists "$units/$NAME.container.d/10-gpu-$f.conf" && GPU=$f; done
-        ADDONS=()
-        for f in "${ALL_ADDONS[@]}"; do
-            sb_exists "$units/$NAME-gateway.container.d/50-addon-$f.conf" && ADDONS+=("$f")
-        done
-        # (an instance from before Claude Code was an add-on mounts it in NAME.container)
-        f=$(sb_read "$units/$NAME.container.d/20-claude-code.conf"; sb_read "$units/$NAME.container")
-        f=$(printf '%s\n' "$f" \
-            | sed -n 's|^Volume=\(.*\):/home/agent/\.claude\(:z\)\{0,1\}$|\1|p' | head -n 1)
-        [ -z "$f" ] || CLAUDE_CONFIG=${f/#%h/$home}
-        f=$(sb_read "$units/$NAME.container.d/21-codex.conf" \
-            | sed -n 's|^Volume=\(.*\):/home/agent/\.codex\(:z\)\{0,1\}$|\1|p' | head -n 1)
-        [ -z "$f" ] || CODEX_CONFIG=${f/#%h/$home}
-        gw=$(sb_read "$cfg/gateway.env")
-        read -ra PORTS <<<"$(env_value "$gw" GATEWAY_INBOUND_PORTS | tr ',' ' ')"
-    fi
+    sb_exists "$cfg/setup.conf" \
+        || die "instance '$NAME' has no $cfg/setup.conf; set it up again with setup.sh and its options"
+    SETTINGS_FROM=$cfg/setup.conf
+    while IFS='=' read -r k v; do
+        case "$k" in
+            FLAVOR|WORKSPACE|NET|MODE|PROFILES|GPU|CLAUDE_CONFIG|CODEX_CONFIG|MEMORY|CPUS|REGISTRY)
+                printf -v "$k" '%s' "$v" ;;
+            PORTS)  read -ra PORTS <<<"$v" ;;
+            ADDONS) read -ra ADDONS <<<"$v" ;;
+        esac
+    done < <(sb_read "$cfg/setup.conf")
     # gateway.env is never rewritten, so it has the mode and profiles in effect
     gw=$(sb_read "$cfg/gateway.env")
     if [ -n "$gw" ]; then
@@ -205,7 +182,7 @@ case "$CMD" in
         ADDONS=("${kept[@]}") ;;
 esac
 [[ "$NAME" =~ ^[a-z][a-z0-9-]{0,30}$ ]] || die "--name: lowercase letters, digits and '-' only"
-case "$FLAVOR" in minimal|node|node-chromium|python|python-gui|julia|julia-gui|octave|octave-gui|full|full-rocm) ;; *) die "unknown flavor $FLAVOR" ;; esac
+case "${FLAVOR%-utils}" in minimal|node|julia|octave|full) ;; *) [ "$FLAVOR" = full-rocm ] || die "unknown flavor $FLAVOR" ;; esac
 case "$NET" in plain|tailscale) ;; *) die "--net must be plain or tailscale" ;; esac
 case "$MODE" in standard|strict|open) ;; *) die "--mode must be standard, strict or open" ;; esac
 case "$GPU" in ""|amd|nvidia) ;; *) die "--gpu must be amd or nvidia" ;; esac
@@ -227,26 +204,27 @@ config_src_ok "$CLAUDE_CONFIG" || die "--claude-config: a volume name or an abso
 for p in "${PORTS[@]}"; do [[ "$p" =~ ^[0-9]{1,5}$ ]] || die "bad port $p"; done
 [ "$REGISTRY" != ghcr.io/OWNER ] || die "set --registry (or AGENT_SANDBOX_REGISTRY), e.g. ghcr.io/<owner> or localhost"
 
-# Image + default allowlists from the flavor
-base_flavor=${FLAVOR%-rocm}
+# Image + default allowlists from the flavor. lang: the core flavor without the
+# -utils/-rocm variant (full-rocm is full-utils + ROCm)
+lang=${FLAVOR%-rocm}; lang=${lang%-utils}
 IMAGE=$REGISTRY/agent-sandbox:$FLAVOR
-IMAGE_ROCM=$REGISTRY/agent-sandbox:$base_flavor-rocm
-[ "$GPU" = amd ] && [ "$base_flavor" != full ] && echo "NOTE: only full-rocm is prebuilt; build $base_flavor-rocm yourself (see build.sh) or use --flavor full."
+IMAGE_ROCM=$REGISTRY/agent-sandbox:$lang-rocm
+[ "$GPU" = amd ] && [ "$lang" != full ] && echo "NOTE: only full-rocm is prebuilt; build $lang-rocm yourself (see build.sh) or use --flavor full-utils."
 if [ -z "$PROFILES" ]; then
-    case "$base_flavor" in
-        minimal)          PROFILES= ;;
-        node|node-*)      PROFILES=node ;;
-        python|python-*)  PROFILES=python ;;
-        julia|julia-*)    PROFILES=julia ;;
-        octave|octave-*)  PROFILES=octave ;;
-        full)             PROFILES=node,python,julia ;;
+    # Every image has Python (uv), so PyPI is allowed by default everywhere
+    case "$lang" in
+        minimal) PROFILES=python ;;
+        node)    PROFILES=node,python ;;
+        julia)   PROFILES=julia,python ;;
+        octave)  PROFILES=octave,python ;;
+        full)    PROFILES=node,python,julia ;;
     esac
 fi
 LANG_VOLUMES=()
-case "$base_flavor" in node*|full) LANG_VOLUMES+=("Volume=agent-sandbox-npm:/home/agent/.npm") ;; esac
-case "$base_flavor" in python*|full) LANG_VOLUMES+=("Volume=agent-sandbox-uv-python:/home/agent/.local/share/uv") ;; esac
-case "$base_flavor" in julia*|full) LANG_VOLUMES+=("Volume=agent-sandbox-julia-depot:/home/agent/.julia") ;; esac
-case "$base_flavor" in octave*) LANG_VOLUMES+=("Volume=agent-sandbox-octave:/home/agent/.local/share/octave") ;; esac
+case "$lang" in node|full) LANG_VOLUMES+=("Volume=agent-sandbox-npm:/home/agent/.npm") ;; esac
+LANG_VOLUMES+=("Volume=agent-sandbox-uv-python:/home/agent/.local/share/uv")   # uv is in every image
+case "$lang" in julia|full) LANG_VOLUMES+=("Volume=agent-sandbox-julia-depot:/home/agent/.julia") ;; esac
+case "$lang" in octave) LANG_VOLUMES+=("Volume=agent-sandbox-octave:/home/agent/.local/share/octave") ;; esac
 
 # Users and paths
 ME=$(id -un)

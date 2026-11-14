@@ -1,0 +1,55 @@
+# Utilities layer: everything beyond a headless toolchain that is worth having in
+# any box, on top of any language image. Every flavor has a headless variant
+# (<flavor>) and one with this layer (<flavor>-utils); add new general tools here
+# rather than as another variant.
+#
+#  - Virtual X display (Xvfb) + Mesa software OpenGL (llvmpipe, OpenGL 4.5 core),
+#    for GLMakie, VTK/OCP (build123d), Octave plots, anything that needs an X
+#    server or libGL. Started by entrypoint.d/40-xvfb.sh.
+#  - Headless Chromium + the shared libraries Playwright's own browsers and
+#    Electron need. For screenshots, browser tests, Playwright, Electron.jl
+#    (WGLMakie's test suite).
+#
+# No GPU: WebGL runs on SwiftShader, which recent Chromium only enables with
+# --enable-unsafe-swiftshader. Rootless containers lack the userns setup
+# Chromium's sandbox wants, hence --no-sandbox. Debian's chromium wrapper sources
+# /etc/chromium.d/*; Playwright/Electron need the same flags passed explicitly.
+ARG BASE=localhost/agent-sandbox-stage:base
+FROM ${BASE}
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+USER root
+
+# Xvfb + Mesa. The second group: X/GL client libs needed by e.g. the VTK-enabled
+# cadquery-ocp wheel. GLFW and most X11 libs for Julia come from its own JLL
+# artifacts; libGL must come from the system.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      xvfb xauth mesa-utils \
+      libgl1 libglx-mesa0 libgl1-mesa-dri libegl1 libglu1-mesa \
+      libxrender1 libxext6 libxcursor1 libxi6 libxinerama1 libxft2 libxrandr2 \
+      libxkbcommon0 libfontconfig1 fonts-liberation \
+    && apt-get clean && rm -rf /var/lib/apt/lists/* \
+ && mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix \
+ && xvfb-run -a -s "-screen 0 640x480x24" glxinfo -B \
+      | tee /dev/stderr | grep -Eq "OpenGL core profile version string: ([4-9]|3\.[3-9])"
+
+# Chromium
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      chromium fonts-noto-color-emoji \
+      libnss3 libatk1.0-0t64 libatk-bridge2.0-0t64 libcups2t64 libdrm2 libgbm1 \
+      libgtk-3-0t64 libxcomposite1 libxdamage1 libxfixes3 \
+      libasound2t64 libxss1 libxshmfence1 \
+    && apt-get clean && rm -rf /var/lib/apt/lists/* \
+ && printf '%s\n' \
+      'export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --no-sandbox --headless=new --use-angle=swiftshader --enable-unsafe-swiftshader"' \
+      > /etc/chromium.d/container \
+ && chromium --version
+
+# Playwright: keep its downloaded browsers in the persistent ~/.cache volume, or
+# use the system Chromium (executablePath: '/usr/bin/chromium').
+ENV DISPLAY=:99 \
+    PLAYWRIGHT_BROWSERS_PATH=/home/agent/.cache/ms-playwright \
+    CHROME_PATH=/usr/bin/chromium
+RUN install -d -o agent -g agent /home/agent/.cache
+
+COPY --chmod=0644 entrypoint.d/ /usr/local/lib/agent-sandbox/entrypoint.d/
+COPY --chmod=0644 claude-md/ /usr/share/agent-sandbox/claude-md/
