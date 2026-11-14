@@ -58,7 +58,8 @@ check() {   # check <description> <expected: ok|blocked> <command...>
     if [ "$got" = "$want" ]; then echo "PASS  $what ($got)"; else echo "FAIL  $what (expected $want, got $got)"; fail=1; fi
 }
 check "Anthropic API via proxy"      ok      curl -s -o /dev/null --max-time 15 https://api.anthropic.com
-check "GitHub via proxy"             ok      curl -sf -o /dev/null --max-time 15 https://api.github.com/zen
+# Any HTTP answer: unauthenticated API calls from shared runner IPs hit rate limits (403)
+check "GitHub via proxy"             ok      curl -s -o /dev/null --max-time 15 https://api.github.com/zen
 check "non-allowlisted host"         blocked curl -sf -o /dev/null --max-time 15 https://example.com
 check "direct connection (no proxy)" blocked curl --noproxy '*' -s -o /dev/null --max-time 8 https://1.1.1.1
 check "LAN / metadata address"       blocked curl -sf -o /dev/null --max-time 8 http://169.254.169.254
