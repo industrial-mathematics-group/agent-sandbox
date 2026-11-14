@@ -24,7 +24,7 @@ on:
     inputs:
       targets:
         description: "Flavors and gateways to build (./build.sh --list), space separated"
-        default: "full gateway gateway-tailscale"
+        default: "full-utils gateway gateway-tailscale"
       push:
         description: "Push to the registry after the smoke test"
         type: boolean

@@ -2,16 +2,20 @@
 # Builds agent-sandbox images locally (Podman, Docker or Buildah) and in CI.
 #
 #   ./build.sh full                    # one flavor
-#   ./build.sh node python gateway     # several
+#   ./build.sh node julia gateway      # several
 #   ./build.sh --list                  # what exists
 #   ./build.sh --registry ghcr.io/me --tag-suffix -amd64 --push node
 #   ./build.sh --engine buildah node   # daemonless (CI runners without Docker)
 #
-# Every flavor is a chain: images/base -> its layers -> images/final.
+# Every flavor is a chain: images/base -> its layers -> images/final. Two tiers:
+#   <flavor>        headless core: base (shell tools, Python + uv) + the language
+#   <flavor>-utils  the same + layers/utils (virtual display, Chromium, and any
+#                   other general tool worth having in every box)
+# so a host running several flavors stores base and the language layers once.
 # No coding agent is part of any image: the claude-code and codex add-ons install
 # them at container start.
 # Each step is a normal `podman/docker build` with --build-arg BASE=<previous
-# step>, so there is nothing engine-specific. Shared prefixes (base, base+python …)
+# step>, so there is nothing engine-specific. Shared prefixes (base, base+node …)
 # are built once per run and come from the build cache after that.
 #
 # Version pins (all optional, passed through as build args when set):
@@ -20,23 +24,22 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-# flavor -> layers between base and the final step
+# flavor -> layers between base and the final step (the headless core); every
+# core flavor also gets a <flavor>-utils variant with layers/utils on top
 declare -A CHAIN=(
     [minimal]=""
     [node]="images/node"
-    [node-chromium]="images/node layers/chromium"
-    [python]="images/python"
-    [python-gui]="images/python layers/xvfb layers/chromium"
     [julia]="images/julia"
-    [julia-gui]="images/julia layers/xvfb layers/chromium"
     [octave]="images/octave"
-    [octave-gui]="images/octave layers/xvfb"
-    [full]="images/node images/python images/julia layers/xvfb layers/chromium"
-    [full-rocm]="images/node images/python images/julia layers/xvfb layers/chromium layers/rocm"
+    [full]="images/node images/julia"
 )
+CORE_ORDER="minimal node julia octave full"
+for f in $CORE_ORDER; do CHAIN[$f-utils]="${CHAIN[$f]} layers/utils"; done
+# Extras on top of a -utils variant
+CHAIN[full-rocm]="${CHAIN[full-utils]} layers/rocm"
+FLAVOR_ORDER="$(for f in $CORE_ORDER; do printf '%s %s-utils ' "$f" "$f"; done)full-rocm"
 # Gateway variants -> tag of agent-sandbox-gateway
 declare -A GATEWAY=( [gateway]=latest [gateway-tailscale]=tailscale )
-FLAVOR_ORDER="minimal node node-chromium python python-gui julia julia-gui octave octave-gui full full-rocm"
 
 ENGINE=${ENGINE:-}
 REGISTRY=localhost
@@ -50,10 +53,10 @@ while [ $# -gt 0 ]; do
         --tag-suffix) SUFFIX=$2; shift 2 ;;
         --push)       PUSH=1; shift ;;
         --list)
-            for f in $FLAVOR_ORDER; do printf '%-14s base %s\n' "$f" "$(echo "${CHAIN[$f]}" | sed 's|images/||g; s|layers/|+|g')"; done
-            printf '%-14s gateway (plain)\n%-14s gateway (Tailscale exit node)\n' gateway gateway-tailscale
+            for f in $FLAVOR_ORDER; do printf '%-16s %s\n' "$f" "$(echo base ${CHAIN[$f]} | sed 's|images/||g; s|layers/|+|g')"; done
+            printf '%-16s gateway (plain)\n%-16s gateway (Tailscale exit node)\n' gateway gateway-tailscale
             exit 0 ;;
-        -h|--help)    sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)    sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         -*)           echo "unknown option $1" >&2; exit 2 ;;
         *)            targets+=("$1"); shift ;;
     esac

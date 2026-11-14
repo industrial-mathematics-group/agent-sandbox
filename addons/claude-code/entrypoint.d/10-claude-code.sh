@@ -6,7 +6,7 @@
 claude_code_setup() {
     local d=/opt/agent-sandbox/addons/claude-code f=/run/agent-sandbox/addons/claude-code.env
     local content line val version="" src
-    # The add-on's env file, then sandbox.env (older setups set it there), then stable
+    # The add-on's env file, else stable
     if content=$(drop_to_agent cat "$f" 2>/dev/null); then
         while IFS= read -r line; do
             [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?CLAUDE_CODE_VERSION=(.*)$ ]] || continue
@@ -19,7 +19,7 @@ claude_code_setup() {
         echo "WARN: claude-code: $f is not readable by agent; using defaults (and the gateway" \
              "may not allow Anthropic's hosts)." >&2
     fi
-    version=${version:-${CLAUDE_CODE_VERSION:-stable}}
+    version=${version:-stable}
 
     # Mount is owned by the host user (= agent) and may be mode 0700: read as agent,
     # run as root, so the installed files are root-owned.
@@ -38,11 +38,8 @@ claude_code_setup() {
     [ -x /opt/claude-code/bin/claude ] && ln -sfn /opt/claude-code/bin/claude /opt/agent-sandbox/bin/claude
 
     # Managed CLAUDE.md: loaded in every session, root-owned, outside ~/.claude.
-    # (Images from before the add-on write it themselves and have no AGENTS.md.)
-    if [ -r /etc/agent-sandbox/AGENTS.md ]; then
-        install -d -m 0755 /etc/claude-code
-        install -m 0644 /etc/agent-sandbox/AGENTS.md /etc/claude-code/CLAUDE.md
-    fi
+    install -d -m 0755 /etc/claude-code
+    install -m 0644 /etc/agent-sandbox/AGENTS.md /etc/claude-code/CLAUDE.md
     return 0
 }
 claude_code_setup || echo "WARN: claude-code: setup failed." >&2
