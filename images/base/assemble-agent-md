@@ -1,14 +1,17 @@
 #!/bin/bash
-# Builds the managed /etc/claude-code/CLAUDE.md from the fragments each image
-# layer ships (/usr/share/agent-sandbox/claude-md/NN-name.md, sorted by name)
-# and the fragments of mounted add-ons (/opt/agent-sandbox/addons/*/claude.md).
+# Builds /etc/agent-sandbox/AGENTS.md, the notes that tell the coding agent about
+# this environment, from the fragments each image layer ships
+# (/usr/share/agent-sandbox/claude-md/NN-name.md, sorted by name) and the fragments
+# of mounted add-ons (/opt/agent-sandbox/addons/*/claude.md).
 #
-# The managed-policy location is loaded in every Claude Code session, can't be
-# excluded, is root-owned (the agent can't edit it) and lives outside the
-# ~/.claude volume, so it always matches the image and the active add-ons.
+# Root-owned, so the agent can't edit it, and outside the agents' config folders,
+# so it always matches the image and the active add-ons. The agent add-ons hand it
+# to their CLI: claude-code copies it to the managed /etc/claude-code/CLAUDE.md
+# (loaded in every session, can't be excluded), codex puts it into
+# /etc/codex/config.toml as developer_instructions.
 set -euo pipefail
 
-out=${1:-/etc/claude-code/CLAUDE.md}
+out=${1:-/etc/agent-sandbox/AGENTS.md}
 # Add-on mounts belong to the host user (= agent) and are usually mode 0700; the
 # entrypoint's root has no CAP_DAC_OVERRIDE, so it reads them as agent.
 read_addon() {

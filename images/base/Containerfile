@@ -1,7 +1,7 @@
 # agent-sandbox base: Debian trixie + shell tooling + entrypoint. No language
-# runtimes and no Claude Code yet: those come from the language images and the
-# final images/final step (see build.sh for the chains); Claude Code is installed
-# at container start (install-claude-code).
+# runtimes and no coding agent: runtimes come from the language images (see
+# build.sh for the chains), the agent CLIs (Claude Code, Codex) from add-ons that
+# install them at container start (addons/claude-code, addons/codex).
 #
 # No sudo and no firewall tools on purpose: the network is owned and filtered by
 # the gateway sidecar (gateway/), whose network namespace this container joins.
@@ -24,10 +24,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Unprivileged user. uid/gid 1000 so files in /workspace match the usual first
-# host user (Docker) or the host sandbox user via keep-id (Podman).
+# host user (Docker) or the host sandbox user via keep-id (Podman). ~/.claude and
+# ~/.codex are only mount points for the agent add-ons: agent-owned, so a new named
+# volume mounted there belongs to agent too.
 RUN groupadd -g 1000 agent \
  && useradd -m -u 1000 -g 1000 -s /bin/zsh agent \
- && mkdir -p /workspace /commandhistory /home/agent/.claude /home/agent/.local/bin \
+ && mkdir -p /workspace /commandhistory /home/agent/.claude /home/agent/.codex /home/agent/.local/bin \
  && touch /commandhistory/.zsh_history \
  && chown -R agent:agent /workspace /commandhistory /home/agent
 
@@ -58,16 +60,17 @@ RUN git config --file /home/agent/.gitconfig core.pager delta \
  && chown agent:agent /home/agent/.gitconfig
 
 # Entrypoint + hooks. Layers add their own hooks to entrypoint.d (e.g. Xvfb) and
-# their CLAUDE.md fragments to claude-md/; the entrypoint assembles them.
+# their instruction fragments to claude-md/; the entrypoint assembles them into
+# /etc/agent-sandbox/AGENTS.md, which the agent add-ons hand to their CLI.
 COPY --chmod=0755 entrypoint.sh /usr/local/bin/entrypoint.sh
-COPY --chmod=0755 assemble-claude-md install-claude-code /usr/local/bin/
+COPY --chmod=0755 assemble-agent-md /usr/local/bin/
 RUN install -d -m 0755 /usr/local/lib/agent-sandbox/entrypoint.d \
                        /usr/share/agent-sandbox/claude-md /opt/agent-sandbox/addons /opt/agent-sandbox/bin \
-                       /etc/claude-code
+                       /etc/agent-sandbox
 COPY --chmod=0644 claude-md/ /usr/share/agent-sandbox/claude-md/
 
 LABEL org.opencontainers.image.title="agent-sandbox base" \
-      org.opencontainers.image.description="Sandboxed container for coding agents such as Claude Code: base layer"
+      org.opencontainers.image.description="Sandboxed container for coding agents such as Claude Code or Codex: base layer"
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["zsh"]

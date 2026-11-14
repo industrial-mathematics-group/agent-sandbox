@@ -2,7 +2,7 @@
 
 You are running inside an isolated development container (agent-sandbox). This file
 describes the environment and is the same for every project. A project's own
-`CLAUDE.md`/`README.md` adds to it and wins where they conflict.
+`CLAUDE.md`/`AGENTS.md`/`README.md` adds to it and wins where they conflict.
 
 ## Basics
 
@@ -18,8 +18,8 @@ describes the environment and is the same for every project. A project's own
 
 All traffic goes through a filtering proxy (`HTTPS_PROXY=http://127.0.0.1:3128`) in a
 separate gateway container. Direct connections are blocked, and the proxy only lets
-through the hosts the user allowed (usually Anthropic, GitHub and the package
-registries of the installed languages). A refused host shows up as an HTTP 403 from
+through the hosts the user allowed (usually your model provider, GitHub and the
+package registries of the installed languages). A refused host shows up as an HTTP 403 from
 the proxy or a failed `CONNECT`. LAN and IPv6 are blocked.
 
 - Tools that ignore the proxy variables will fail; that is expected, not a bug to fix.
@@ -30,12 +30,10 @@ the proxy or a failed `CONNECT`. LAN and IPv6 are blocked.
 
 ## What persists
 
-Only `/workspace` (on the host), `~/.claude` (Claude Code settings and memory) and
-the language caches listed below survive a restart or image update. Everything else
-is reset on update, including global `npm install -g`, files in `/tmp` and anything
-outside these paths. Put project tooling into the project.
-Claude Code itself is managed by the container (root-owned, updated at start); don't
-try to install or update it.
+Only `/workspace` (on the host), your own config folder (see below) and the language
+caches listed below survive a restart or image update. Everything else is reset on
+update, including global `npm install -g`, files in `/tmp` and anything outside these
+paths. Put project tooling into the project.
 
 ## Resources
 
