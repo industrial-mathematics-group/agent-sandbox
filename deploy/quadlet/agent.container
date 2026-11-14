@@ -18,6 +18,11 @@ Image=@IMAGE@
 ContainerName=@NAME@
 Network=@NAME@-gateway.container
 AutoUpdate=registry
+# Check the registry at every start: a new instance must not run an old image that is
+# still in local storage from an earlier one (add-on files from this repo expect the
+# current images, e.g. the gateway's github-app token broker). Offline, or for a
+# local build, the local image is used.
+Pull=newer
 
 # Your host user (the sandbox user) appears as `agent` (uid 1000) inside
 UserNS=keep-id:uid=1000,gid=1000

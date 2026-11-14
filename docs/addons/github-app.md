@@ -134,6 +134,21 @@ for the same host, github-app's credential helper wins for it (its hook runs lat
 
 ## Troubleshooting
 
+The gateway reads `github-app.env` and the key only when it starts: after changing
+either, restart the gateway (`systemctl --user restart <name>-gateway`, which restarts
+the agent too), not just the agent. Its log has the reason for anything below:
+
+```bash
+journalctl --user -u <name>-gateway -b | grep github-app
+podman exec <name>-gateway ls /usr/local/bin/github-app-broker   # missing: old gateway image
+```
+
+- `no token broker on http://127.0.0.1:3129` in the agent log: the gateway image predates
+  the add-on (pull it: `podman pull <registry>/agent-sandbox-gateway:latest`, then restart
+  the gateway; the units pull a newer image at start since `Pull=newer`), or the gateway
+  wasn't restarted since the add-on was added. A broker that can't start (no key, bad
+  settings) answers with the reason, which the agent log shows as
+  `the broker reports: gateway: …`.
 - `no private key` / `not a valid private key` in the gateway log: `github-app.pem` is
   empty or not the downloaded `.pem`.
 - `… is not readable by the gateway`: the key belongs to someone else than the gateway's
