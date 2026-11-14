@@ -63,23 +63,7 @@ not into another variant.
 
 `full-rocm` is `full-utils` + ROCm (amd64), for AMDGPU.jl and PyTorch-ROCm.
 
-**Old flavor names.** Their tags are still published, as the flavor that replaced them,
-so existing instances keep getting updates. They are deprecated; switch to the new name:
-
-| Old | New |
-|---|---|
-| `python` | `minimal` |
-| `python-gui` | `minimal-utils` |
-| `node-chromium` | `node-utils` (now also with the virtual display) |
-| `julia-gui` | `julia-utils` |
-| `octave-gui` | `octave-utils` (now also with Chromium) |
-| `full` | still exists, but is headless now: use `full-utils` for the old `full` |
-
-Quadlet: rerun `setup.sh` with your options, or any `setup.sh add-addon`/`remove-addon`,
-and it switches the instance to the new name (`setup.sh show NAME` prints the command;
-for `full`, pass `--flavor full-utils`). Compose: set `FLAVOR` in `.env`. Existing gateways
-keep their `GATEWAY_PROFILES`; add `python` there if agents in a non-Python box should
-reach PyPI (new instances get it by default).
+New instances allow PyPI (the `python` allowlist) in every flavor.
 
 Gateway: `ghcr.io/OWNER/agent-sandbox-gateway:latest` (plain) and `:tailscale`.
 
@@ -94,8 +78,8 @@ Gateway: `ghcr.io/OWNER/agent-sandbox-gateway:latest` (plain) and `:tailscale`.
 | deployment | `deploy/quadlet`, `deploy/compose` | Quadlet templates + `setup.sh` · Compose files |
 
 The base and each layer add a fragment to the environment notes
-(`/etc/agent-sandbox/AGENTS.md`), and so does each mounted add-on, so the agent is told exactly which tools it has. The file is
-root-owned; the claude-code add-on hands it to Claude Code as the managed
+(`/etc/agent-sandbox/AGENTS.md`), and so does each mounted add-on, so the agent is told
+exactly which tools it has. The file is root-owned; the claude-code add-on hands it to Claude Code as the managed
 `/etc/claude-code/CLAUDE.md` (loaded in every session), the codex add-on to Codex as
 `developer_instructions` in `/etc/codex/config.toml`.
 
@@ -295,8 +279,8 @@ Quadlet: add or remove an add-on on an existing instance without retyping its op
 ```
 
 They read the settings `setup.sh` saved in `~/.config/agent-sandbox/<name>/setup.conf` of
-the sandbox user (instances set up before that: from the unit files), rewrite the units
-and keep every env file; then `systemctl --user daemon-reload` and restart the gateway.
+the sandbox user, rewrite the units and keep every env file; then
+`systemctl --user daemon-reload` and restart the gateway.
 Pass `--sandbox-user` when it isn't `agent-sandbox`. Compose: remove the `-f` file to turn
 an add-on off.
 

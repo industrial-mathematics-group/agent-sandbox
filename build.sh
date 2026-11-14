@@ -4,7 +4,6 @@
 #   ./build.sh full                    # one flavor
 #   ./build.sh node julia gateway      # several
 #   ./build.sh --list                  # what exists
-#   ./build.sh --aliases               # old flavor names and their successors
 #   ./build.sh --registry ghcr.io/me --tag-suffix -amd64 --push node
 #   ./build.sh --engine buildah node   # daemonless (CI runners without Docker)
 #
@@ -39,16 +38,6 @@ for f in $CORE_ORDER; do CHAIN[$f-utils]="${CHAIN[$f]} layers/utils"; done
 # Extras on top of a -utils variant
 CHAIN[full-rocm]="${CHAIN[full-utils]} layers/rocm"
 FLAVOR_ORDER="$(for f in $CORE_ORDER; do printf '%s %s-utils ' "$f" "$f"; done)full-rocm"
-# Old flavor names -> the flavor that replaced them. Building a flavor also tags
-# (and pushes) it under its old names, so existing deployments keep pulling
-# updates. Deprecated: switch to the new name.
-declare -A ALIAS=(
-    [python]=minimal
-    [python-gui]=minimal-utils
-    [node-chromium]=node-utils
-    [julia-gui]=julia-utils
-    [octave-gui]=octave-utils
-)
 # Gateway variants -> tag of agent-sandbox-gateway
 declare -A GATEWAY=( [gateway]=latest [gateway-tailscale]=tailscale )
 
@@ -67,10 +56,7 @@ while [ $# -gt 0 ]; do
             for f in $FLAVOR_ORDER; do printf '%-16s %s\n' "$f" "$(echo base ${CHAIN[$f]} | sed 's|images/||g; s|layers/|+|g')"; done
             printf '%-16s gateway (plain)\n%-16s gateway (Tailscale exit node)\n' gateway gateway-tailscale
             exit 0 ;;
-        --aliases)    # old name -> flavor, one per line (CI tags the old names too)
-            for a in "${!ALIAS[@]}"; do echo "$a ${ALIAS[$a]}"; done | sort
-            exit 0 ;;
-        -h|--help)    sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)    sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         -*)           echo "unknown option $1" >&2; exit 2 ;;
         *)            targets+=("$1"); shift ;;
     esac
@@ -97,17 +83,8 @@ build() {   # build <context> <tag> [build args...]
     "$ENGINE" build "${extra[@]}" "${version_args[@]}" "$@" -t "$tag" -f "$ctx/Containerfile" "$ctx"
 }
 
-aliases_of() {   # aliases_of <flavor>: its old names
-    local a
-    for a in "${!ALIAS[@]}"; do [ "${ALIAS[$a]}" = "$1" ] && echo "$a"; done | sort
-}
-
 build_flavor() {
-    local flavor=$1 prev key layer tag a
-    if [ -n "${ALIAS[$flavor]+x}" ]; then
-        echo "NOTE: flavor '$flavor' is now '${ALIAS[$flavor]}'; building that." >&2
-        flavor=${ALIAS[$flavor]}
-    fi
+    local flavor=$1 prev key layer tag
     [ -n "${CHAIN[$flavor]+x}" ] || { echo "unknown flavor '$flavor' (see --list)" >&2; exit 2; }
     key=base
     prev=$STAGE:base
@@ -121,10 +98,6 @@ build_flavor() {
     tag="$REGISTRY/agent-sandbox:$flavor$SUFFIX"
     build images/final "$tag" --build-arg "BASE=$prev" --build-arg "FLAVOR=$flavor"
     [ "$PUSH" = 1 ] && "$ENGINE" push "$tag"
-    for a in $(aliases_of "$flavor"); do
-        "$ENGINE" tag "$tag" "$REGISTRY/agent-sandbox:$a$SUFFIX"
-        [ "$PUSH" = 1 ] && "$ENGINE" push "$REGISTRY/agent-sandbox:$a$SUFFIX"
-    done
     return 0
 }
 
