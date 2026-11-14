@@ -31,6 +31,12 @@ case "$(uname -m)" in
 esac
 
 install -d -m 0755 "$DIR" "$DIR/bin" "$DIR/versions"
+# This runs as root, which can't enter the agent's ~/.codex (owned by agent, often mode
+# 0700, and root has no CAP_DAC_OVERRIDE): the `codex --version` calls below get a
+# CODEX_HOME of their own, or Codex warns "failed to read CODEX_HOME ... Permission
+# denied". Not under /tmp: Codex refuses to put its helper links there.
+export CODEX_HOME=$DIR/.root-home
+install -d -m 0700 "$CODEX_HOME"
 # Several sandboxes may share the volume and start at the same time
 exec 9>"$DIR/.lock"
 flock -w 300 9

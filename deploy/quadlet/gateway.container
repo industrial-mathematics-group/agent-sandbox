@@ -7,6 +7,11 @@ Image=@GATEWAY_IMAGE@
 ContainerName=@NAME@-gateway
 Network=@NAME@.network
 AutoUpdate=registry
+# Check the registry at every start: a new instance must not run an old image that is
+# still in local storage from an earlier one (add-on files from this repo expect the
+# current images, e.g. the gateway's github-app token broker). Offline, or for a
+# local build, the local image is used.
+Pull=newer
 
 # GATEWAY_MODE, GATEWAY_PROFILES, GATEWAY_EXTRA_DOMAINS, GATEWAY_INBOUND_PORTS (+ TS_* for Tailscale)
 EnvironmentFile=@CONFIG_DIR@/gateway.env

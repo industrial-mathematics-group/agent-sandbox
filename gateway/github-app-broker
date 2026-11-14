@@ -6,6 +6,9 @@
 #   github-app-broker prepare   as root at gateway start: check the settings, copy them
 #                               and the key to the broker's own user (exit 1: don't serve)
 #   github-app-broker serve     as root: listen on 127.0.0.1:PORT as that user
+#   github-app-broker serve-error  as root, after a failed prepare: the same port, but
+#                               every request is answered with the reason (read from
+#                               stdin), so the agent's log says why, not just "no broker"
 #   github-app-broker handle    one HTTP request on stdin/stdout (run by socat)
 #   github-app-broker token     print a token's JSON (debugging, as the broker user)
 #
@@ -245,7 +248,7 @@ case "$cmd" in
         [ "$ENV_SRC" = "$STATE/github-app.env" ] || as_broker "umask 077; cat > '$STATE/github-app.env'" < "$ENV_SRC"
         as_broker "openssl pkey -in '$STATE/key.pem' -noout" 2>/dev/null \
             || die "$KEY_SRC is not a valid private key; broker not started"
-        as_broker "rm -f '$STATE/token.json' '$STATE/identity.json' '$STATE/installation-id'"
+        as_broker "rm -f '$STATE/token.json' '$STATE/identity.json' '$STATE/installation-id' '$STATE/error'"
         log "token broker on 127.0.0.1:$PORT for $HOST (app $GITHUB_APP_ID, ${GITHUB_APP_INSTALLATION_ID:+installation $GITHUB_APP_INSTALLATION_ID}${GITHUB_APP_INSTALLATION_ID:-owner $GITHUB_APP_OWNER}${GITHUB_APP_REPOSITORIES:+, repositories $GITHUB_APP_REPOSITORIES}${GITHUB_APP_PERMISSIONS:+, permissions $GITHUB_APP_PERMISSIONS})"
         ;;
     serve)
@@ -255,7 +258,21 @@ case "$cmd" in
         exec su -s /bin/sh "$RUN_AS" -c \
             "exec socat TCP-LISTEN:$PORT,bind=127.0.0.1,reuseaddr,fork,max-children=16 EXEC:'$SELF handle'"
         ;;
+    serve-error)
+        [ "$(id -u)" = 0 ] || die "serve-error runs as root (it drops to $RUN_AS)"
+        [[ "$PORT" =~ ^[0-9]{1,5}$ ]] || die "bad port $PORT"
+        sed 's/^github-app: //' | tail -n 3 | as_broker "umask 077; cat > '$STATE/error'" || true
+        exec su -s /bin/sh "$RUN_AS" -c \
+            "exec socat TCP-LISTEN:$PORT,bind=127.0.0.1,reuseaddr,fork,max-children=16 EXEC:'$SELF handle'"
+        ;;
     handle)
+        # prepare failed (serve-error): answer every request with its reason
+        if [ -s "$STATE/error" ]; then
+            export LC_ALL=C
+            while IFS= read -r -t 5 h; do h=${h%$'\r'}; [ -n "$h" ] || break; done
+            respond 502 "$(jq -nc --arg e "$(cat "$STATE/error")" '{error: ("gateway: " + $e)}')"
+            exit 0
+        fi
         # A broken setting is answered over HTTP too, so the agent sees why
         if ! err=$( (load_settings) 2>&1 >/dev/null); then
             export LC_ALL=C

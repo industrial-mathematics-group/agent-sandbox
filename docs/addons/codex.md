@@ -83,3 +83,10 @@ your own user with `compose.podman.yaml`, otherwise `chown -R 1000 codex codex.e
 
 The agent log shows `Codex <version> ready`; `codex doctor` inside the sandbox checks the
 config, login and the endpoints (its WebSocket probe may warn; Codex falls back to HTTPS).
+
+`failed to read CODEX_HOME "/home/agent/.codex": Permission denied` at start came from the
+installer, which runs as root and can't enter the agent's `~/.codex`; it was harmless and
+current versions give the installer a home of its own. If `codex` itself says it as
+`agent`, the Codex folder belongs to someone else: as the sandbox user,
+`ls -ld ~/.config/agent-sandbox/codex` must show the sandbox user (fix:
+`sudo chown -R <sandbox user>: ~<sandbox user>/.config/agent-sandbox/codex && chmod 700 …`).
