@@ -17,8 +17,8 @@
 #   --port N             publish/open a TCP port for dev servers (repeatable).
 #                        plain: published on 127.0.0.1:N of the host; tailscale: open on the tailnet
 #   --gpu amd|nvidia     local GPU (amd switches to the -rocm image)
-#   --addon NAME         add-on: claude-code, codex, gpu-remote, slurm, git-remote, notify
-#                        (repeatable). Its hosts are allowlisted in the gateway automatically.
+#   --addon NAME         add-on: claude-code, codex, gpu-remote, slurm, git-remote, notify,
+#                        github-app (repeatable). Its hosts are allowlisted in the gateway automatically.
 #                        claude-code is added unless claude-code or codex is given.
 #   --claude-config SRC  ~/.claude of the claude-code add-on: a named volume or an absolute
 #                        host folder (default: volume agent-sandbox-claude, shared by instances)
@@ -57,7 +57,7 @@ SANDBOX_USER=agent-sandbox
 HOST_SETUP=1
 DRY=0
 
-usage() { sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,37p' "$0" | sed 's/^# \{0,1\}//'; }
 while [ $# -gt 0 ]; do
     case "$1" in
         --name)         NAME=$2; shift 2 ;;
@@ -89,8 +89,8 @@ case "$NET" in plain|tailscale) ;; *) die "--net must be plain or tailscale" ;; 
 case "$MODE" in standard|strict|open) ;; *) die "--mode must be standard, strict or open" ;; esac
 case "$GPU" in ""|amd|nvidia) ;; *) die "--gpu must be amd or nvidia" ;; esac
 for a in "${ADDONS[@]}"; do
-    case "$a" in claude-code|codex|gpu-remote|slurm|git-remote|notify) ;;
-        *) die "unknown add-on $a (claude-code, codex, gpu-remote, slurm, git-remote, notify)" ;; esac
+    case "$a" in claude-code|codex|gpu-remote|slurm|git-remote|notify|github-app) ;;
+        *) die "unknown add-on $a (claude-code, codex, gpu-remote, slurm, git-remote, notify, github-app)" ;; esac
 done
 # A sandbox without a coding agent is rarely what you want: Claude Code by default
 case " ${ADDONS[*]} " in
@@ -279,6 +279,7 @@ for a in "${ADDONS[@]}"; do
         slurm)      dropins+=("$REPO/addons/slurm/quadlet/31-slurm.conf") ;;
         git-remote) dropins+=("$REPO/addons/git-remote/quadlet/32-git-remote.conf") ;;
         notify)     dropins+=("$REPO/addons/notify/quadlet/33-notify.conf") ;;
+        github-app) dropins+=("$REPO/addons/github-app/quadlet/34-github-app.conf") ;;
     esac
     # The add-on's client (bin/: on PATH), helpers its hooks run as root (libexec/),
     # claude.md and start-up hooks, mounted read-only into the agent
@@ -297,6 +298,12 @@ for a in "${ADDONS[@]}"; do
     env=$CONFIG_DIR/$a.env
     if exists "$env"; then echo "   keeping $env"; else install_file 600 "$REPO/addons/$a/$a.env.example" "$env"; fi
 done
+# github-app: the App's private key, mounted into the gateway only. An empty
+# placeholder keeps the mount (and so the gateway) working until you put it there.
+if has_addon github-app && ! exists "$CONFIG_DIR/github-app.pem"; then
+    : > "$TMP/github-app.pem"
+    install_file 600 "$TMP/github-app.pem" "$CONFIG_DIR/github-app.pem"
+fi
 # Agent config folders given as host paths: create them for the sandbox user. A
 # folder outside its home (e.g. an existing /srv/... one) is left as it is.
 for cfg in "$(has_addon claude-code && echo "$CLAUDE_CONFIG")" "$(has_addon codex && echo "$CODEX_CONFIG")"; do
@@ -313,6 +320,12 @@ if [ ${#ADDONS[@]} -gt 0 ]; then
         render "$HERE/addon-gateway.conf" "$TMP/50-addon-$a.conf"
         sed -i "s/@ADDON@/$a/g" "$TMP/50-addon-$a.conf"
         install_file 644 "$TMP/50-addon-$a.conf" "$UNIT_DIR/$NAME-gateway.container.d/50-addon-$a.conf"
+        # More gateway drop-ins of the add-on (github-app: its private key)
+        for f in "$REPO/addons/$a/quadlet/gateway/"*.conf; do
+            [ -f "$f" ] || continue
+            render "$f" "$TMP/gw-$(basename "$f")"
+            install_file 644 "$TMP/gw-$(basename "$f")" "$UNIT_DIR/$NAME-gateway.container.d/$(basename "$f")"
+        done
     done
 fi
 if [ ${#dropins[@]} -gt 0 ]; then
@@ -348,6 +361,7 @@ $( [ "$SAME_USER" = 0 ] && echo "  sudo machinectl shell $SANDBOX_USER@" )
 $( for a in "${ADDONS[@]}"; do
        if ssh_addon "$a"; then echo "  nano ${CONFIG_DIR/#$SB_HOME/\~}/$a.env   # + SSH key in ${CONFIG_DIR/#$SB_HOME/\~}/${a%%-*}-ssh/ (addons/$a/README.md)"
        elif [ "$a" = codex ]; then echo "  # Codex login: copy your auth.json into ${CODEX_CONFIG/#$SB_HOME/\~}/ (addons/codex/README.md)"
+       elif [ "$a" = github-app ]; then echo "  nano ${CONFIG_DIR/#$SB_HOME/\~}/github-app.env   # App ID, organization; App private key -> github-app.pem (addons/github-app/README.md)"
        elif [ "$a" != claude-code ]; then echo "  nano ${CONFIG_DIR/#$SB_HOME/\~}/$a.env   # host, token (addons/$a/README.md)"; fi
      done )
 $( case "$IMAGE" in localhost/*) ;; *) echo "  podman login --authfile ~/.config/containers/auth.json ${IMAGE%%/*}   # private packages: once";; esac )

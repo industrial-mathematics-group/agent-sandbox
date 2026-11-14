@@ -1,9 +1,9 @@
 #!/bin/bash
-# Gateway entrypoint: allowlist + proxy config, firewall, then the proxy and
-# (Tailscale variant) tailscaled. The agent container waits for the proxy port,
-# which only opens after the firewall is in place. If the proxy or tailscaled
-# dies, the container exits, so the agent loses its network (fails closed) and
-# the service manager restarts both.
+# Gateway entrypoint: allowlist + proxy config, firewall, then the proxy,
+# (Tailscale variant) tailscaled and (github-app add-on) the token broker. The
+# agent container waits for the proxy port, which only opens after the firewall is
+# in place. If one of them dies, the container exits, so the agent loses its
+# network (fails closed) and the service manager restarts both.
 set -euo pipefail
 
 VPN=${GATEWAY_VPN:-none}
@@ -28,6 +28,17 @@ fi
 /usr/local/bin/render-config.sh
 /usr/local/bin/init-firewall.sh
 
+pids=()
+# github-app add-on: token broker on 127.0.0.1:3129, before the proxy opens (the
+# agent's start-up hook asks it once the proxy answers). A broken setup only
+# costs the add-on: the gateway log says why and the agent warns.
+if [ -f /etc/agent-sandbox/addons/github-app.env ]; then
+    if /usr/local/bin/github-app-broker prepare; then
+        /usr/local/bin/github-app-broker serve &
+        pids+=("$!")
+    fi
+fi
+
 tinyproxy -d -c /run/agent-gateway/tinyproxy.conf &
 proxy_pid=$!
 for _ in $(seq 50); do
@@ -36,7 +47,7 @@ for _ in $(seq 50); do
 done
 echo "Gateway ready: proxy on 127.0.0.1:${GATEWAY_PROXY_PORT:-3128}, mode ${GATEWAY_MODE:-standard}, vpn $VPN"
 
-pids=("$proxy_pid")
+pids+=("$proxy_pid")
 if [ "$VPN" = tailscale ]; then
     /usr/local/bin/containerboot &
     pids+=("$!")

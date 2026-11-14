@@ -22,6 +22,7 @@
 #   ../../addons/gpu-remote/compose.yaml            remote GPU server gateway
 #   ../../addons/slurm/compose.yaml                 Slurm cluster gateway
 #   ../../addons/git-remote/compose.yaml            push/pull/API for one Git hosting account
+#   ../../addons/github-app/compose.yaml            GitHub as a GitHub App (key stays in the gateway)
 #   ../../addons/notify/compose.yaml                push notifications (ntfy, gotify, ...)
 name: ${SANDBOX_NAME:-agent}
 

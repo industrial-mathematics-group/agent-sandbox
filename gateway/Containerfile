@@ -8,17 +8,22 @@
 ARG BASE_IMAGE=docker.io/library/alpine:3.22
 FROM ${BASE_IMAGE}
 
+# openssl + socat: the github-app add-on's token broker (signs the App JWT, serves
+# tokens on 127.0.0.1:3129 as its own user ghapp).
 # iproute2: tailscaled marks its own sockets (fwmark 0x80000) only when policy
 # routing (`ip rule`) is available; the firewall recognises its traffic by that mark.
-RUN apk add --no-cache bash ipset bind-tools jq curl iproute2 iptables ip6tables tinyproxy \
+RUN apk add --no-cache bash ipset bind-tools jq curl iproute2 iptables ip6tables tinyproxy openssl socat \
  && addgroup -S -g 3128 agentproxy \
  && adduser -S -D -H -u 3128 -G agentproxy -s /sbin/nologin agentproxy \
- && install -d -m 0755 /etc/agent-sandbox /etc/agent-sandbox/lists /run/agent-gateway
+ && addgroup -S -g 3129 ghapp \
+ && adduser -S -D -H -u 3129 -G ghapp -s /sbin/nologin ghapp \
+ && install -d -m 0755 /etc/agent-sandbox /etc/agent-sandbox/lists /run/agent-gateway \
+ && install -d -m 0700 -o ghapp -g ghapp /var/lib/github-app
 
 # lists/ is created above: COPY --chmod would otherwise give the new directory
 # mode 0644 too, and root without CAP_DAC_OVERRIDE couldn't read it at runtime.
 COPY --chmod=0644 lists/ /etc/agent-sandbox/lists/
-COPY --chmod=0755 entrypoint.sh render-config.sh init-firewall.sh /usr/local/bin/
+COPY --chmod=0755 entrypoint.sh render-config.sh init-firewall.sh github-app-broker /usr/local/bin/
 
 ARG VARIANT=plain
 ENV GATEWAY_VARIANT=${VARIANT}
