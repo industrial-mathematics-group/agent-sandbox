@@ -31,12 +31,17 @@ fi
 pids=()
 # github-app add-on: token broker on 127.0.0.1:3129, before the proxy opens (the
 # agent's start-up hook asks it once the proxy answers). A broken setup only
-# costs the add-on: the gateway log says why and the agent warns.
+# costs the add-on: the broker then answers every request with the reason, so the
+# gateway log and the agent's log both say why.
 if [ -f /etc/agent-sandbox/addons/github-app.env ]; then
-    if /usr/local/bin/github-app-broker prepare; then
+    if broker_log=$(/usr/local/bin/github-app-broker prepare 2>&1); then
+        [ -z "$broker_log" ] || echo "$broker_log" >&2
         /usr/local/bin/github-app-broker serve &
-        pids+=("$!")
+    else
+        echo "$broker_log" >&2
+        printf '%s\n' "$broker_log" | /usr/local/bin/github-app-broker serve-error &
     fi
+    pids+=("$!")
 fi
 
 tinyproxy -d -c /run/agent-gateway/tinyproxy.conf &
