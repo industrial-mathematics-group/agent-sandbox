@@ -1,0 +1,85 @@
+# Docs Q&A bot: answers questions about the documentation in docs/ with Claude.
+#
+# Ask by starting a comment on any issue or pull request with /ask, e.g.
+#   /ask How do I add a host to the network allowlist?
+# or by opening an issue with /ask in its title or body.
+#
+# The work happens in .github/docs-bot/ask.py; this file only decides when to run it and
+# posts its answer. Setup (repository Settings -> Secrets and variables -> Actions):
+#   secret   ANTHROPIC_API_KEY      required, a Claude Console API key
+#   variable DOCS_BOT_APP_ID        optional, the App ID of a GitHub App to post as
+#   secret   DOCS_BOT_APP_PRIVATE_KEY  optional, that App's private key (.pem contents)
+# Without the App settings the answer is posted as github-actions[bot].
+name: docs-bot
+
+on:
+  issues:
+    types: [opened]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  answer:
+    # Only run for /ask, never for bots (so the bot can't trigger itself), and only for
+    # people with write access, so strangers can't spend the API credit.
+    if: >-
+      (
+        (github.event_name == 'issues'
+          && (contains(github.event.issue.title, '/ask') || contains(github.event.issue.body, '/ask')))
+        || (github.event_name == 'issue_comment'
+          && startsWith(github.event.comment.body, '/ask'))
+      )
+      && github.event.sender.type != 'Bot'
+      && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'),
+                  github.event.comment.author_association || github.event.issue.author_association)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            docs
+            .github/docs-bot
+
+      - uses: actions/setup-python@v6
+        with: { python-version: "3.13" }
+      - run: pip install anthropic==2.8.0
+
+      # The question text is passed through environment variables, never pasted into the
+      # script with ${{ }}: issue text written by anyone must not become shell code.
+      - name: Ask Claude
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          ANSWER_FILE: answer.md
+        run: |
+          if [ -n "$COMMENT_BODY" ]; then
+            QUESTION="${COMMENT_BODY#/ask}"
+          else
+            QUESTION="$ISSUE_TITLE"$'\n\n'"$ISSUE_BODY"
+          fi
+          export QUESTION
+          python .github/docs-bot/ask.py
+          printf '\n---\n<sub>Answered by Claude from the docs in this repository; it can be wrong.</sub>\n' >> answer.md
+
+      # Post as the custom GitHub App when it is configured, else as github-actions[bot].
+      - name: Get a token for the GitHub App
+        id: app-token
+        if: vars.DOCS_BOT_APP_ID != ''
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.DOCS_BOT_APP_ID }}
+          private-key: ${{ secrets.DOCS_BOT_APP_PRIVATE_KEY }}
+
+      - name: Post the answer
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          NUMBER: ${{ github.event.issue.number }}
+        run: gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" -F body=@answer.md
