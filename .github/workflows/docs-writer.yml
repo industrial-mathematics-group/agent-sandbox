@@ -1,0 +1,181 @@
+# Docs writer: writes or refreshes docs/ from the code with Claude and opens a pull request.
+#
+# Start a comment on any issue or pull request with one of:
+#   @docs make      rebuild the whole site from the code (replaces every page in docs/)
+#   @docs update    fix only what is outdated or missing, keeping everything else as it is
+# "/docs make" and "/docs update" work the same (and don't notify the GitHub user "docs").
+# Text after the command is passed to Claude as a hint, e.g.
+#   @docs update the slurm add-on gained new options
+#
+# The work happens in .github/docs-bot/write_docs.py; this file decides when to run it,
+# commits the result to a new branch, and opens a pull request for review. Nothing is ever
+# pushed to main. Setup is shared with docs-bot.yml (Settings -> Secrets and variables ->
+# Actions):
+#   secret   ANTHROPIC_API_KEY         required
+#   variable DOCS_BOT_APP_ID           optional, a GitHub App to act as (needs Contents,
+#   secret   DOCS_BOT_APP_PRIVATE_KEY  Pull requests and Issues: read and write)
+#   variable DOCS_WRITER_MODEL         optional, default claude-opus-5-5
+# Without the App, the pull request is opened by github-actions[bot]; that needs Settings ->
+# Actions -> General -> "Allow GitHub Actions to create and approve pull requests", and its
+# pull requests don't start other workflows (so the docs build check won't run on them).
+name: docs-writer
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: docs-writer
+  cancel-in-progress: false
+
+jobs:
+  write:
+    # Same gate as the /ask bot: only people with write access, never bots.
+    if: >-
+      (startsWith(github.event.comment.body, '@docs ') || startsWith(github.event.comment.body, '/docs '))
+      && github.event.sender.type != 'Bot'
+      && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      # The comment is passed through an environment variable, never pasted in with ${{ }}.
+      - name: Read the command
+        id: cmd
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          first_line="$(printf '%s\n' "$COMMENT_BODY" | head -n1 | tr -d '\r')"
+          read -r _ command hint <<< "$first_line"
+          case "$command" in
+            make|update) ;;
+            *) echo "::error::Unknown command '$command'; use make or update."; exit 1 ;;
+          esac
+          echo "command=$command" >> "$GITHUB_OUTPUT"
+          { echo "hint<<EOF_HINT"; printf '%s\n' "$hint"; echo "EOF_HINT"; } >> "$GITHUB_OUTPUT"
+
+      - name: Get a token for the GitHub App
+        id: app-token
+        if: vars.DOCS_BOT_APP_ID != ''
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.DOCS_BOT_APP_ID }}
+          private-key: ${{ secrets.DOCS_BOT_APP_PRIVATE_KEY }}
+
+      - name: Acknowledge
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+        run: gh api "repos/$GITHUB_REPOSITORY/issues/comments/$COMMENT_ID/reactions" -f content=eyes
+
+      # Always the default branch, with full history (update looks at what changed since
+      # the docs were last edited).
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token || github.token }}
+
+      - uses: actions/setup-python@v6
+        with: { python-version: "3.13" }
+      - run: pip install anthropic==2.8.0
+
+      - name: Write the docs with Claude
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DOCS_WRITER_MODEL: ${{ vars.DOCS_WRITER_MODEL }}
+          COMMAND: ${{ steps.cmd.outputs.command }}
+          HINT: ${{ steps.cmd.outputs.hint }}
+          SUMMARY_FILE: ${{ runner.temp }}/summary.md
+        run: python .github/docs-bot/write_docs.py "$COMMAND" "$HINT"
+
+      - name: Open a pull request
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          COMMAND: ${{ steps.cmd.outputs.command }}
+          NUMBER: ${{ github.event.issue.number }}
+          ACTOR: ${{ github.event.comment.user.login }}
+          COMMENT_URL: ${{ github.event.comment.html_url }}
+          MODEL: ${{ vars.DOCS_WRITER_MODEL || 'claude-opus-5-5' }}
+          SUMMARY_FILE: ${{ runner.temp }}/summary.md
+          BASE: ${{ github.event.repository.default_branch }}
+        run: |
+          if git diff --quiet && [ -z "$(git ls-files --others --exclude-standard)" ]; then
+            gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
+              -f body="\`$COMMAND\`: $(head -n1 "$SUMMARY_FILE")"
+            exit 0
+          fi
+
+          branch="docs-bot/$COMMAND-$GITHUB_RUN_ID"
+          git config user.name "docs-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git add -A docs zensical.toml
+          git commit -q -m "docs: $COMMAND documentation from the code" \
+            -m "Written by $MODEL from the code on $BASE, requested by @$ACTOR in $COMMENT_URL"
+          git push -q origin "$branch"
+
+          case "$MODEL" in
+            *opus*) family=Opus ;; *sonnet*) family=Sonnet ;; *fable*) family=Fable ;; *) family=Other ;;
+          esac
+          box() { [ "$family" = "$1" ] && echo x || echo " "; }
+          {
+            echo "Requested by @$ACTOR in $COMMENT_URL (\`@docs $COMMAND\`)."
+            echo
+            echo "## Changes"
+            echo
+            cat "$SUMMARY_FILE"
+            echo
+            echo "Review every page before merging: Claude was told to document only what the"
+            echo "code shows, but it can still be wrong."
+            echo
+            echo "## AI declaration"
+            echo
+            echo "Generation (tick one):"
+            echo "- [ ] **G0** Human-written"
+            echo "- [ ] **G1** AI-assisted"
+            echo "- [ ] **G2** AI-generated"
+            echo "- [x] **G3** AI-autonomous"
+            echo
+            echo "AI models that wrote parts of the change:"
+            echo "- [$(box Fable)] **Claude Fable**"
+            echo "- [$(box Opus)] **Claude Opus**"
+            echo "- [$(box Sonnet)] **Claude Sonnet**"
+            echo "- [ ] **GPT Astra**"
+            echo "- [ ] **GPT Sol**"
+            echo "- [ ] **GPT Terra**"
+            echo "- [$(box Other)] **Other:** $([ "$family" = Other ] && echo "$MODEL")"
+            echo
+            echo "Human review (the levels build on each other):"
+            echo "- [ ] **H0** Plausibility check"
+            echo "- [ ] **H1** Tested"
+            echo "- [ ] **H2** Reviewed line by line"
+            echo "- [ ] **H3** Independently validated"
+            echo
+            echo "AI review:"
+            echo "- [ ] **A1** Self-check by the generating session"
+            echo "- [ ] **A2** Review by a new session. Model, if not one of the above:"
+            echo "- [ ] **A3** Extensive review or benchmark by a different model. Model:"
+            echo
+            echo "- [ ] I take responsibility for this change"
+          } > "$RUNNER_TEMP/body.md"
+
+          url="$(gh pr create --base "$BASE" --head "$branch" \
+            --title "docs: $COMMAND documentation from the code" --body-file "$RUNNER_TEMP/body.md")"
+          gh pr edit "$url" --add-assignee "$ACTOR" || true
+          gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
+            -f body="\`$COMMAND\` is ready for review: $url"
+
+      - name: Report a failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          NUMBER: ${{ github.event.issue.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
+            -f body="The docs writer failed, see the [run log]($RUN_URL)."
