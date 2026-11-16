@@ -1,0 +1,6 @@
+# Settings for IMGAgent (github.com/IMGAgent/imgagent), the organisation's bot: what Claude is told about
+# this project when it answers "@IMGAgent docs ask" or writes docs for "@IMGAgent docs make / update".
+[docs]
+about = "an open source project for running coding agents in sandboxed containers"
+audience = "people who deploy and run agent-sandbox on their own Linux machines"
+url = "https://industrial-mathematics-group.github.io/agent-sandbox/"
