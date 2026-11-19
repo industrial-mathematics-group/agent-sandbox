@@ -36,6 +36,46 @@ starts and mounts its home folder, `~/.codex`. Works next to
   can drop `CODEX_DOWNLOAD_HOST`; an allowed npm registry is also a way to publish
   packages.
 
+## Codex as a reviewer
+
+Claude Code reads `CLAUDE.md` and not `AGENTS.md`; Codex reads `AGENTS.md`
+(`~/.codex/AGENTS.md`, then every `AGENTS.md` from the git root down to the working
+directory) and not `CLAUDE.md`. Both get the sandbox's environment notes on top.
+
+To have Codex review code that Claude writes, give it **its own instance** rather than
+the same workspace: it reviews what is on GitHub, with read-only access, and shares no
+files, caches or logins with the instances where the code is written. A rule like "treat
+the workspace as read-only" would only be an instruction (Codex's own sandbox is off
+here); separate instances make it a fact.
+
+1. A separate sandbox user, so not even the shared cache volumes (Julia depot, `~/.cache`)
+   are shared:
+   ```bash
+   sudo useradd -m codex-sandbox
+   ```
+2. The instance, with Codex and GitHub access but without Claude Code:
+   ```bash
+   ./setup.sh --registry ghcr.io/OWNER --sandbox-user codex-sandbox \
+              --name julia-checker --flavor julia --addon codex --addon github-app
+   ```
+3. GitHub access read-only, in `~codex-sandbox/.config/agent-sandbox/julia-checker/github-app.env`
+   (see [github-app](github-app.md)): `GITHUB_APP_PERMISSIONS=contents:read,pull_requests:read`
+   and the repositories in `GITHUB_APP_REPOSITORIES`. An App created with only these
+   permissions is safer still, since then no setting can grant more.
+4. The reviewer instructions as Codex's global `AGENTS.md`, from
+   `example-reviewer-AGENTS.md`:
+   ```bash
+   sudo install -o codex-sandbox -g codex-sandbox -m 644 addons/codex/example-reviewer-AGENTS.md \
+           ~codex-sandbox/.config/agent-sandbox/codex/AGENTS.md
+   ```
+   Global, because the clones in `/workspace` are separate git repositories and Codex
+   would not read a `/workspace/AGENTS.md` from inside them.
+
+Codex then clones with `github-app clone`, can't push or comment, and writes its reports
+to `/workspace/reviews/<repo>/` (on the host:
+`/var/srv/agent-sandbox/julia-checker/reviews/`). To let it post its reviews on pull
+requests, add `pull_requests:write`; it still can't push code.
+
 ## Login
 
 Codex's browser login waits for a redirect to `localhost:1455` on the machine running
