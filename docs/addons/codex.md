@@ -36,6 +36,30 @@ starts and mounts its home folder, `~/.codex`. Works next to
   can drop `CODEX_DOWNLOAD_HOST`; an allowed npm registry is also a way to publish
   packages.
 
+## Codex as reviewer next to Claude Code
+
+Both agents get the same environment notes (Claude as its managed `CLAUDE.md`, Codex as
+`developer_instructions`), but they read different project files: Claude Code reads
+`CLAUDE.md` and doesn't read `AGENTS.md`; Codex reads `AGENTS.md` (`~/.codex/AGENTS.md`,
+then every `AGENTS.md` from the git root down to the working directory) and doesn't read
+`CLAUDE.md`. So rules for only one of them go into that agent's file. Don't import
+`AGENTS.md` into `CLAUDE.md` (`@AGENTS.md`) if it holds Codex-only rules.
+
+`example-project-AGENTS.md` is a project `AGENTS.md` that makes Codex a reviewer: it treats
+the workspace as read-only (no edits, no git commands that change anything, no `Pkg`
+operations that touch `Manifest.toml`), runs only checks that don't write into the project,
+and writes its reviews to `.codex-reviews/YYYY-MM-DD-<topic>.md`. To use it:
+
+1. Copy it to the project root as `AGENTS.md` and fill in the TODOs.
+2. Add `.codex-reviews/` to the project's `.gitignore` (or `.git/info/exclude` to keep it
+   local), unless you want to commit reviews.
+3. Optionally tell Claude in the project's `CLAUDE.md` that `.codex-reviews/` belongs to
+   Codex: it may read the reviews but shouldn't edit them.
+
+The read-only rule is an instruction, not a lock: Codex's own sandbox is off here (see
+above), so nothing technical stops a write. `git status` shows if it strayed. Codex reads
+`AGENTS.md` when a session starts, so restart it after changing the file.
+
 ## Login
 
 Codex's browser login waits for a redirect to `localhost:1455` on the machine running
