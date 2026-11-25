@@ -27,7 +27,11 @@ if [ ! -f "$CONF_DIR/config" ]; then
 # Claude Slurm gateway settings (sourced by ~/.local/bin/claude-slurm-gateway)
 # Everything here is trusted configuration; Claude can't change it.
 
-BASE=\$HOME/claude-jobs            # projects/, runs/, depot/, logs/ (use \$WORK/\$SCRATCH if your cluster has one)
+BASE=\$HOME/claude-jobs            # projects/, depot/, logs/, jobs.tsv
+# Per-job code snapshots incl. their results (can get large). Put them on scratch
+# if home is small, e.g. RUNS_DIR=/scratch/\$USER/claude-runs (must be visible on
+# the compute nodes; snapshots are deleted after RUNS_KEEP_DAYS). Default: \$BASE/runs
+#RUNS_DIR=/scratch/\$USER/claude-runs
 ACCOUNT=                          # --account, if required
 # Partitions Claude may use (cluster has: $parts)
 PARTITIONS="${default}"            # CPU jobs
