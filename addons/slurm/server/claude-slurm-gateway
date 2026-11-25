@@ -28,6 +28,10 @@ CONFIG=${CLAUDE_SLURM_CONFIG:-$HOME/.config/claude-slurm/config}
 [ -f "$CONFIG" ] && . "$CONFIG"
 
 BASE=${BASE:-$HOME/claude-jobs}             # projects/, depot/, logs/, jobs/
+# Per-job code snapshots incl. everything the job writes (results). Can live
+# elsewhere, e.g. on /scratch, while the depot and logs stay in BASE. Must be on
+# a filesystem the compute nodes see.
+RUNS_DIR=${RUNS_DIR:-$BASE/runs}
 ACCOUNT=${ACCOUNT:-}                         # --account, if the cluster needs one
 PARTITIONS=${PARTITIONS:-}                   # partitions allowed for CPU jobs (space separated); empty = cluster default only
 DEFAULT_PARTITION=${DEFAULT_PARTITION:-}
@@ -55,14 +59,20 @@ JULIA=${JULIA:-julia}                        # plain mode only
 PKG_SERVER=${PKG_SERVER:-https://pkg.julialang.org}
 TIMEOUT_SETUP=${TIMEOUT_SETUP:-1800}
 MAX_SYNC_BYTES=${MAX_SYNC_BYTES:-1073741824} # 1 GiB compressed
-RUNS_KEEP_DAYS=${RUNS_KEEP_DAYS:-14}         # per-job code snapshots in runs/
+RUNS_KEEP_DAYS=${RUNS_KEEP_DAYS:-14}         # per-job code snapshots in RUNS_DIR
 
 die()  { echo "gateway: $*" >&2; exit 2; }
 log()  { printf '%s %s\n' "$(date -Is)" "$*" >> "$BASE/gateway.log"; }
 
-mkdir -p "$BASE/projects" "$BASE/depot" "$BASE/logs" "$BASE/jobs" "$BASE/runs" "$BASE/tmp"
+RUNS_DIR=${RUNS_DIR%/}
+[[ "$RUNS_DIR" == /?* ]] || die "RUNS_DIR must be an absolute path, got '$RUNS_DIR'"
+mkdir -p "$BASE/projects" "$BASE/depot" "$BASE/logs" "$BASE/jobs" "$BASE/tmp" "$RUNS_DIR"
 chmod 700 "$BASE"
 touch "$BASE/jobs.tsv"
+# Where run dirs are looked up and cleaned: RUNS_DIR, plus the old default
+# $BASE/runs if RUNS_DIR was moved away from it (jobs submitted before the move)
+RUN_ROOTS=("$RUNS_DIR")
+[ "$RUNS_DIR" != "$BASE/runs" ] && [ -d "$BASE/runs" ] && RUN_ROOTS+=("$BASE/runs")
 
 # ---------------------------------------------------------------------------
 # Parse request: whitespace-separated tokens, strict character set
@@ -88,15 +98,17 @@ own_job() {   # job id submitted by this gateway?
     awk -F'\t' -v j="$1" '$1 == j {f=1} END {exit !f}' "$BASE/jobs.tsv" \
         || die "job $1 was not submitted through this gateway"
 }
-# Code/result directory (runs/<stamp>) of a gateway job. Must be exact: a wrong
+# Code/result directory (<run root>/<stamp>) of a gateway job. Must be exact: a wrong
 # guess hands one job's results to another (several jobs per second in sweeps).
 run_dir_of() {
-    local id=$1 row name wrapper cand=() proj when t d stamp ts s
+    local id=$1 row name wrapper cand=() proj when t d stamp ts s root
     row=$(awk -F'\t' -v j="$id" '$1 == j' "$BASE/jobs.tsv" | tail -n 1)
     # 1. Recorded at submit time (current gateway)
     name=$(cut -f5 <<< "$row")
     if [ -n "$name" ]; then
-        [ -d "$BASE/runs/$name" ] && { echo "$BASE/runs/$name"; return 0; }
+        for root in "${RUN_ROOTS[@]}"; do
+            [ -d "$root/$name" ] && { echo "$root/$name"; return 0; }
+        done
         return 1    # recorded but deleted: don't guess
     fi
     # 2. Older entries: ask Slurm which wrapper was submitted; the wrapper names its run dir
@@ -104,19 +116,23 @@ run_dir_of() {
                 scontrol show job "$id" 2>/dev/null | sed -n 's/^ *Command=//p'; } \
               | grep -o "$BASE/jobs/[A-Za-z0-9._-]*\.sh" | head -n 1)
     if [ -n "$wrapper" ] && [ -f "$wrapper" ]; then
-        d=$(grep -o "$BASE/runs/[A-Za-z0-9._-]*" "$wrapper" | head -n 1)
-        [ -n "$d" ] && [ -d "$d" ] && { echo "$d"; return 0; }
+        for root in "${RUN_ROOTS[@]}"; do
+            d=$(grep -o "$root/[A-Za-z0-9._-]*" "$wrapper" | head -n 1) || d=
+            [ -n "$d" ] && [ -d "$d" ] && { echo "$d"; return 0; }
+        done
     fi
     # 3. Last resort: project + submit time, ONLY if exactly one run dir fits
     proj=$(cut -f2 <<< "$row"); when=$(cut -f4 <<< "$row")
     t=$(date -d "$when" +%s 2>/dev/null) || return 1
-    for d in "$BASE/runs/$proj"-*; do
-        [ -d "$d" ] || continue
-        stamp=${d#"$BASE/runs/$proj-"}
-        [[ "$stamp" =~ ^([0-9]{8})-([0-9]{2})([0-9]{2})([0-9]{2})-[0-9]+$ ]] || continue
-        ts="${BASH_REMATCH[1]} ${BASH_REMATCH[2]}:${BASH_REMATCH[3]}:${BASH_REMATCH[4]}"
-        s=$(date -d "$ts" +%s 2>/dev/null) || continue
-        [ $(( s > t ? s - t : t - s )) -le 15 ] && cand+=("$d")
+    for root in "${RUN_ROOTS[@]}"; do
+        for d in "$root/$proj"-*; do
+            [ -d "$d" ] || continue
+            stamp=${d#"$root/$proj-"}
+            [[ "$stamp" =~ ^([0-9]{8})-([0-9]{2})([0-9]{2})([0-9]{2})-[0-9]+$ ]] || continue
+            ts="${BASH_REMATCH[1]} ${BASH_REMATCH[2]}:${BASH_REMATCH[3]}:${BASH_REMATCH[4]}"
+            s=$(date -d "$ts" +%s 2>/dev/null) || continue
+            [ $(( s > t ? s - t : t - s )) -le 15 ] && cand+=("$d")
+        done
     done
     [ ${#cand[@]} -eq 1 ] && { echo "${cand[0]}"; return 0; }
     [ ${#cand[@]} -gt 1 ] && echo "gateway: job $id: ${#cand[@]} run dirs were created within 15 s of its submission; refusing to guess" >&2
@@ -268,9 +284,12 @@ submit)
     [ "$n" -lt "$MAX_ACTIVE" ] || die "already $n active gateway jobs (max $MAX_ACTIVE); wait or cancel one"
 
     # Snapshot of the code for this job, so a later `sync` can't change it
-    find "$BASE/runs" -mindepth 1 -maxdepth 1 -type d -mtime "+$RUNS_KEEP_DAYS" -exec rm -rf {} + 2>/dev/null || true
+    # (-H: RUNS_DIR itself may be a symlink, e.g. to scratch)
+    for root in "${RUN_ROOTS[@]}"; do
+        find -H "$root" -mindepth 1 -maxdepth 1 -type d -mtime "+$RUNS_KEEP_DAYS" -exec rm -rf {} + 2>/dev/null || true
+    done
     stamp="$project-$(date +%Y%m%d-%H%M%S)-$$"
-    run="$BASE/runs/$stamp"
+    run="$RUNS_DIR/$stamp"
     cp -a "$dir" "$run"
     touch "$run/.snapshot-time"   # fetch only returns files written after this
 

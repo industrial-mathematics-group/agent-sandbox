@@ -10,7 +10,8 @@ jobs are invisible to it.
 
 - Claude's script is never submitted directly. The gateway writes a wrapper job.
   Resources come only from checked `key=value` options (`#SBATCH` lines are ignored).
-  Each job runs on a snapshot of the code (`runs/`), so a later `sync` can't change it.
+  Each job runs on a snapshot of the code (`RUNS_DIR`, default `~/claude-jobs/runs/`),
+  so a later `sync` can't change it. The job's results are written there too.
 - Limits (time, GPUs, CPUs, memory, partitions, concurrent jobs) live in
   `~/.config/claude-slurm/config` on the cluster, out of Claude's reach.
 - **Set `APPTAINER_IMAGE`.** Without it, the job code runs with your account's full
@@ -37,6 +38,24 @@ files next to `deploy/compose/compose.yaml` (`slurm-ssh/`, `slurm.env`).
    `-f ../../addons/slurm/compose.yaml` (Compose). Fill in `slurm.env` (`SLURM_HOST`,
    `SLURM_USER`) and restart. The gateway allowlists `SLURM_HOST` by itself (set
    `SLURM_PRIVATE_IP` too if the login node has a private address).
+
+### Runs on scratch
+
+The job snapshots and everything the jobs write go to `RUNS_DIR`. If your home quota is
+small, point it at a scratch or work filesystem in `~/.config/claude-slurm/config`, while
+the Julia depot, logs and `jobs.tsv` stay in `BASE`:
+
+```bash
+RUNS_DIR=/scratch/$USER/claude-runs   # default: $BASE/runs
+RUNS_KEEP_DAYS=14                     # snapshots older than this are deleted
+```
+
+- Use a directory of its own: the gateway deletes every subdirectory older than
+  `RUNS_KEEP_DAYS` in it. It must be visible on the compute nodes (not node-local).
+- `RUNS_DIR` may be a symlink. Prefer the setting over symlinking `BASE/runs`.
+- After moving `RUNS_DIR` away from `$BASE/runs`, jobs submitted before the change
+  are still found (and cleaned up) in `$BASE/runs`. Moving it from one custom path to
+  another is not tracked: move the old run dirs over yourself if you still need them.
 
 ## Use (inside the sandbox)
 
