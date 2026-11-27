@@ -23,7 +23,8 @@ Run as **your normal user**; it uses sudo where needed.
 Run it again with the same `--name` to change an instance (it rewrites the units and
 keeps the env files), or with another `--name` for another project. Every option is in
 the [setup.sh reference](../reference/setup-sh.md); `--dry-run` prints what would be
-written.
+written. `./setup.sh -i` asks for the settings instead, and can start from an existing
+instance's settings: see [Guided setup](../reference/setup-sh.md#guided-setup).
 
 ## Several projects
 

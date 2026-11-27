@@ -44,6 +44,7 @@ sudo useradd -m agent-sandbox                     # once
 cd deploy/quadlet
 ./setup.sh --registry ghcr.io/OWNER --flavor node-utils --name web \
            --workspace /var/srv/agent-sandbox/web --port 5173
+# or let it ask for image, add-ons, limits and network:  ./setup.sh -i
 ```
 
 Then, as the sandbox user (`sudo machinectl shell agent-sandbox@`):

@@ -27,6 +27,12 @@ next steps when it is done. Claude Code is included unless you choose agents you
 `--addon codex` for Codex only, `--addon claude-code --addon codex` for both. All options
 are in the [setup.sh reference](../reference/setup-sh.md).
 
+!!! tip "Guided setup"
+    Rather answer questions than look up options? `./setup.sh -i` walks you through the
+    image, add-ons, CPU/memory limits, GPU and network one step at a time, then prints the
+    equivalent `setup.sh` command line before writing anything. See
+    [Guided setup](../reference/setup-sh.md#guided-setup).
+
 ## 3. Configure and start
 
 As the sandbox user (`sudo machinectl shell agent-sandbox@`):
