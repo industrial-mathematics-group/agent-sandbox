@@ -17,8 +17,7 @@ As your normal user, from a clone of the repository:
 
 ```bash
 cd deploy/quadlet
-./setup.sh --registry ghcr.io/OWNER --flavor node-utils --name web \
-           --workspace /var/srv/agent-sandbox/web --port 5173
+./setup.sh --flavor node-utils --name web --workspace /var/srv/agent-sandbox/web --port 5173
 ```
 
 `setup.sh` sets up subuids, linger, the workspace (shared with your user via ACLs,
