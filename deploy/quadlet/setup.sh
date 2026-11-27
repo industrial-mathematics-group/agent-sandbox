@@ -37,7 +37,8 @@
 #   --codex-config SRC   ~/.codex of the codex add-on: an absolute host folder or a named
 #                        volume (default: ~SANDBOX_USER/.config/agent-sandbox/codex, shared)
 #   --memory SIZE --cpus N   container limits (default: 16g, min(8, nproc))
-#   --registry REG       image registry (default: $AGENT_SANDBOX_REGISTRY or ghcr.io/OWNER;
+#   --registry REG       image registry (default: $AGENT_SANDBOX_REGISTRY or
+#                        ghcr.io/industrial-mathematics-group;
 #                        use "localhost" for images built with ./build.sh)
 #   --sandbox-user USER  run the containers as this user (default: agent-sandbox;
 #                        "$USER" = your own account, no isolation between you and it)
@@ -70,14 +71,14 @@ CLAUDE_CONFIG=agent-sandbox-claude
 CODEX_CONFIG=
 MEMORY=16g
 CPUS=$(n=$(nproc 2>/dev/null || echo 8); [ "$n" -lt 8 ] && echo "$n" || echo 8)   # 8, or fewer on smaller hosts
-REGISTRY=${AGENT_SANDBOX_REGISTRY:-ghcr.io/OWNER}
+REGISTRY=${AGENT_SANDBOX_REGISTRY:-ghcr.io/industrial-mathematics-group}
 SANDBOX_USER=agent-sandbox
 HOST_SETUP=1
 DRY=0
 INTERACTIVE=0
 ALL_ADDONS=(claude-code codex gpu-remote slurm git-remote notify github-app)
 
-usage() { sed -n '2,54p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,55p' "$0" | sed 's/^# \{0,1\}//'; }
 die() { echo "ERROR: $*" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
@@ -215,7 +216,7 @@ config_src_ok() { [[ "$1" =~ ^/[^:,[:space:]]*$ || "$1" =~ ^[A-Za-z0-9][A-Za-z0-
 config_src_ok "$CLAUDE_CONFIG" || die "--claude-config: a volume name or an absolute path without ':' or ','"
 [ -z "$CODEX_CONFIG" ] || config_src_ok "$CODEX_CONFIG" || die "--codex-config: a volume name or an absolute path without ':' or ','"
 for p in "${PORTS[@]}"; do [[ "$p" =~ ^[0-9]{1,5}$ ]] || die "bad port $p"; done
-[ "$REGISTRY" != ghcr.io/OWNER ] || die "set --registry (or AGENT_SANDBOX_REGISTRY), e.g. ghcr.io/<owner> or localhost; or run ./setup.sh -i for a guided setup"
+[[ -n "$REGISTRY" && "$REGISTRY" != *[[:space:]]* ]] || die "--registry: e.g. ghcr.io/<owner> or localhost"
 
 # Image + default allowlists from the flavor. lang: the core flavor without the
 # -utils/-rocm variant (full-rocm is full-utils + ROCm)

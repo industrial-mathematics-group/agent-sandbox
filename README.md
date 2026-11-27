@@ -42,8 +42,7 @@ Needs Podman >= 5.0. The containers run as systemd user services under a dedicat
 ```bash
 sudo useradd -m agent-sandbox                     # once
 cd deploy/quadlet
-./setup.sh --registry ghcr.io/OWNER --flavor node-utils --name web \
-           --workspace /var/srv/agent-sandbox/web --port 5173
+./setup.sh --flavor node-utils --name web --workspace /var/srv/agent-sandbox/web --port 5173
 # or let it ask for image, add-ons, limits and network:  ./setup.sh -i
 ```
 

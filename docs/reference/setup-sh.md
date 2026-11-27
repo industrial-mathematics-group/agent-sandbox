@@ -37,7 +37,7 @@ setup is skipped for them unless you pass `--host-setup`.
 | `--codex-config SRC` | `~SANDBOX_USER/.config/agent-sandbox/codex` | `~/.codex` of the codex add-on: an absolute host folder or a named volume. |
 | `--memory SIZE` | `16g` | Memory limit of the agent container. |
 | `--cpus N` | `min(8, nproc)` | CPU limit of the agent container. |
-| `--registry REG` | `$AGENT_SANDBOX_REGISTRY` | Image registry, e.g. `ghcr.io/OWNER`; `localhost` for images built with `./build.sh`. Required. |
+| `--registry REG` | `$AGENT_SANDBOX_REGISTRY`, else `ghcr.io/industrial-mathematics-group` | Image registry: another `ghcr.io/OWNER` for your own builds, `localhost` for images built with `./build.sh`. |
 | `--sandbox-user USER` | `agent-sandbox` | Run the containers as this user. `"$USER"` = your own account, no isolation between you and it. |
 | `--no-host-setup` | | Skip the subuid/linger/groups/ACL/SELinux steps. |
 | `--host-setup` | | Do them (for `show`/`add-addon`/`remove-addon`). |
@@ -63,8 +63,16 @@ taking them as options:
 6. **Host setup**: yes the first time for a sandbox user and workspace.
 
 At the end it shows a summary and the equivalent command line, and asks whether to write
-the instance, only do a dry run, or cancel. Nothing is written before that, and Esc or
-Ctrl-C at any question cancels.
+the instance, only do a dry run, go back, or cancel. Nothing is written before that.
+
+**Back** (the Cancel button of each dialog, or `<` at a plain prompt) goes to the
+previous question, also from the summary. Esc or Ctrl-C cancels.
+
+When `setup.sh` needs sudo (a sandbox user other than you, or the host setup), the
+dialogs ask for your sudo password in a password box instead of dropping back to the
+terminal. It is handed to `sudo -v` through a pipe, never in arguments, the environment
+or a file, and sudo's usual login cache covers the rest of the run. Plain prompts let
+sudo ask as usual.
 
 The answers set exactly what the options set, and `setup.sh` then runs as it would with
 those options, so a guided run writes the same files as the printed command line. Keep
@@ -77,7 +85,7 @@ terminal; scripts keep using the options.
 
 ```bash
 ./setup.sh -i                                  # everything asked
-./setup.sh -i --registry localhost --name sims # these as the defaults
+./setup.sh -i --registry localhost --name sims # these as the defaults (localhost: ./build.sh images)
 AGENT_SANDBOX_UI=plain ./setup.sh -i           # plain prompts even with whiptail installed
 ```
 
@@ -86,8 +94,7 @@ AGENT_SANDBOX_UI=plain ./setup.sh -i           # plain prompts even with whiptai
 A web project with a Vite dev server, then GitHub access for it:
 
 ```bash
-./setup.sh --registry ghcr.io/OWNER --name web --flavor node-utils \
-           --workspace ~/code/site --port 5173
+./setup.sh --name web --flavor node-utils --workspace ~/code/site --port 5173
 ./setup.sh add-addon web github-app
 ./setup.sh show web
 ```

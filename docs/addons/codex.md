@@ -55,7 +55,7 @@ here); separate instances make it a fact.
    ```
 2. The instance, with Codex and GitHub access but without Claude Code:
    ```bash
-   ./setup.sh --registry ghcr.io/OWNER --sandbox-user codex-sandbox \
+   ./setup.sh --sandbox-user codex-sandbox \
               --name julia-checker --flavor julia --addon codex --addon github-app
    ```
 3. GitHub access read-only, in `~codex-sandbox/.config/agent-sandbox/julia-checker/github-app.env`
