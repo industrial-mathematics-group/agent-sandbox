@@ -9,6 +9,7 @@ summary.
 
 ```bash
 ./setup.sh [options]                   # set up (or rewrite) an instance
+./setup.sh -i [options]                # the same, guided: asks for each setting
 ./setup.sh show NAME                   # an instance's settings and add-ons
 ./setup.sh add-addon NAME ADDON...     # add add-ons to an instance
 ./setup.sh remove-addon NAME ADDON...  # remove add-ons from an instance
@@ -41,6 +42,44 @@ setup is skipped for them unless you pass `--host-setup`.
 | `--no-host-setup` | | Skip the subuid/linger/groups/ACL/SELinux steps. |
 | `--host-setup` | | Do them (for `show`/`add-addon`/`remove-addon`). |
 | `--dry-run` | | Print what would be written, change nothing. |
+| `-i`, `--interactive` | | [Guided setup](#guided-setup) in the terminal. Other options given with it are the defaults of the questions. |
+
+## Guided setup
+
+`./setup.sh -i` (or `--interactive`) asks for the settings one step at a time instead of
+taking them as options:
+
+1. **Sandbox user** and **instance name**. If the instance exists, it offers to start
+   from its saved settings (its env files are kept either way).
+2. **Image**: registry, language (`minimal`, `node`, `julia`, `octave`, `full`) and
+   variant (headless, `-utils`, or `-rocm` for `full`), then the workspace folder.
+3. **Add-ons**: a checklist of `claude-code`, `codex`, `github-app`, `git-remote`,
+   `notify`, `slurm` and `gpu-remote`, with at least one coding agent. Then where
+   `~/.claude` / `~/.codex` live for the agents you picked.
+4. **Hardware**: memory and CPU limits of the agent container (it shows what the host
+   has) and a local GPU (none, AMD, NVIDIA).
+5. **Network**: plain or Tailscale, gateway mode, allowlist profiles (preselected for the
+   image) and dev-server ports.
+6. **Host setup**: yes the first time for a sandbox user and workspace.
+
+At the end it shows a summary and the equivalent command line, and asks whether to write
+the instance, only do a dry run, or cancel. Nothing is written before that, and Esc or
+Ctrl-C at any question cancels.
+
+The answers set exactly what the options set, and `setup.sh` then runs as it would with
+those options, so a guided run writes the same files as the printed command line. Keep
+that line to recreate the instance in a script, or see it again later with
+`./setup.sh show NAME`.
+
+It uses `whiptail` or `dialog` when one is installed, and plain numbered prompts
+otherwise. `AGENT_SANDBOX_UI=plain` (or `whiptail`, `dialog`) picks one. It needs a
+terminal; scripts keep using the options.
+
+```bash
+./setup.sh -i                                  # everything asked
+./setup.sh -i --registry localhost --name sims # these as the defaults
+AGENT_SANDBOX_UI=plain ./setup.sh -i           # plain prompts even with whiptail installed
+```
 
 ## Example
 

@@ -4,6 +4,8 @@
 # it uses sudo where needed.
 #
 #   ./setup.sh [options]                  set up (or rewrite) an instance
+#   ./setup.sh -i [options]               the same, guided: asks for image, add-ons,
+#                                         limits and network (options = the defaults)
 #   ./setup.sh show NAME                  an instance's settings and add-ons
 #   ./setup.sh add-addon NAME ADDON...    add add-ons to an instance
 #   ./setup.sh remove-addon NAME ADDON... remove add-ons from an instance
@@ -42,6 +44,8 @@
 #   --no-host-setup      skip subuids/linger/groups/ACL/SELinux steps
 #   --host-setup         do them (for show/add-addon/remove-addon)
 #   --dry-run            print what would be written, change nothing
+#   -i, --interactive    guided setup in the terminal (whiptail/dialog if installed,
+#                        else plain prompts); prints the equivalent options at the end
 #
 # Example: a web project with a Vite dev server
 #   ./setup.sh --name web --flavor node-utils --workspace ~/code/site --port 5173
@@ -70,9 +74,10 @@ REGISTRY=${AGENT_SANDBOX_REGISTRY:-ghcr.io/OWNER}
 SANDBOX_USER=agent-sandbox
 HOST_SETUP=1
 DRY=0
+INTERACTIVE=0
 ALL_ADDONS=(claude-code codex gpu-remote slurm git-remote notify github-app)
 
-usage() { sed -n '2,48p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,54p' "$0" | sed 's/^# \{0,1\}//'; }
 die() { echo "ERROR: $*" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
@@ -152,12 +157,20 @@ while [ $# -gt 0 ]; do
         --no-host-setup) HOST_SETUP=0; shift ;;
         --host-setup)   HOST_SETUP=1; shift ;;
         --dry-run)      DRY=1; shift ;;
+        -i|--interactive) INTERACTIVE=1; shift ;;
         -h|--help)      usage; exit 0 ;;
         *)              echo "unknown option: $1 (see --help)" >&2; exit 2 ;;
     esac
 done
 
 [ "$CMD" = setup ] || [ "$NAME" = "$LOADED_NAME" ] || die "$CMD: give the instance name only once, not also as --name"
+# Guided setup: the answers set the same variables as the options above
+if [ "$INTERACTIVE" = 1 ]; then
+    [ "$CMD" = setup ] || die "--interactive is for setting up an instance, not for $CMD"
+    # shellcheck source=setup-guided.sh
+    . "$HERE/setup-guided.sh"
+    guided_setup
+fi
 for a in "${CMD_ADDONS[@]}"; do
     case " ${ALL_ADDONS[*]} " in *" $a "*) ;; *) die "unknown add-on $a (${ALL_ADDONS[*]})" ;; esac
 done
@@ -202,7 +215,7 @@ config_src_ok() { [[ "$1" =~ ^/[^:,[:space:]]*$ || "$1" =~ ^[A-Za-z0-9][A-Za-z0-
 config_src_ok "$CLAUDE_CONFIG" || die "--claude-config: a volume name or an absolute path without ':' or ','"
 [ -z "$CODEX_CONFIG" ] || config_src_ok "$CODEX_CONFIG" || die "--codex-config: a volume name or an absolute path without ':' or ','"
 for p in "${PORTS[@]}"; do [[ "$p" =~ ^[0-9]{1,5}$ ]] || die "bad port $p"; done
-[ "$REGISTRY" != ghcr.io/OWNER ] || die "set --registry (or AGENT_SANDBOX_REGISTRY), e.g. ghcr.io/<owner> or localhost"
+[ "$REGISTRY" != ghcr.io/OWNER ] || die "set --registry (or AGENT_SANDBOX_REGISTRY), e.g. ghcr.io/<owner> or localhost; or run ./setup.sh -i for a guided setup"
 
 # Image + default allowlists from the flavor. lang: the core flavor without the
 # -utils/-rocm variant (full-rocm is full-utils + ROCm)
@@ -259,6 +272,8 @@ setup_cmdline() {
     [ "$SANDBOX_USER" = agent-sandbox ] || out+=" --sandbox-user $SANDBOX_USER"
     printf '%s\n' "$out"
 }
+# Guided setup: show the settings and their command line, then ask
+[ "$INTERACTIVE" = 0 ] || guided_confirm
 if [ "$CMD" = show ]; then
     echo "Instance '$NAME' of $SANDBOX_USER (settings from $SETTINGS_FROM)"
     echo "  image       $IMAGE$( [ "$GPU" = amd ] && echo " ($IMAGE_ROCM with the GPU)")"
