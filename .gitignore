@@ -9,3 +9,6 @@ deploy/compose/codex/
 
 # Built documentation (zensical build)
 site/
+
+# Python wheels (pip download leftovers)
+*.whl
